@@ -63,6 +63,12 @@ if groq_api_key:
 else:
     log.warning("GROQ_API_KEY not found. DJ and Chat features will be disabled.")
 
+# 24/7 Radio Dictionary
+IDLE_RADIOS = {
+    'lofi': 'https://www.youtube.com/watch?v=jfKfPfyJRdk', # Lofi Girl
+    'jazz': 'https://www.youtube.com/watch?v=Dx5qFachd3A', # Relaxing Jazz
+    'synth': 'https://www.youtube.com/watch?v=4xDzrJKXOOY', # Synthwave Radio
+}
 
 def is_spotify_url(url: str) -> bool:
     return "open.spotify.com/" in url and any(x in url for x in ["/track/", "/album/", "/playlist/"])
@@ -170,6 +176,8 @@ class Music(commands.Cog):
         # Maps guild_id to currently playing item dict to allow going back
         self.current_song = {}
         self.remove_locks = set()
+        self.active_radios = {}
+        self.is_playing_radio = set()
         
         # SQLite Database Integration for Ranking System
         self._init_db()
@@ -289,7 +297,51 @@ class Music(commands.Cog):
                 await self.play_next(ctx)
         else:
             self.current_song[ctx.guild.id] = None
-            await ctx.send("Queue empty. Waiting for more tracks.")
+            if ctx.guild.id in self.active_radios:
+                radio_genre = self.active_radios[ctx.guild.id]
+                radio_url = IDLE_RADIOS[radio_genre]
+                self.is_playing_radio.add(ctx.guild.id)
+                try:
+                    player = await YTDLSource.from_query(radio_url, loop=self.bot.loop, stream=True)
+                    ctx.voice_client.play(player, after=lambda e: self.bot.loop.create_task(self.play_next(ctx)) if e is None else log.error(f'Radio error: {e}'))
+                    await ctx.send(f"📻 進入 24H 沉浸模式：**{radio_genre.upper()} Radio** 正在為您聯播...")
+                except Exception as e:
+                    await ctx.send(f"❌ 無法連線至 **{radio_genre.upper()}** 直播源 (可能 YouTube 發生異常)。")
+                    self.active_radios.pop(ctx.guild.id, None)
+                    self.is_playing_radio.discard(ctx.guild.id)
+            else:
+                await ctx.send("Queue empty. Waiting for more tracks.")
+
+    @commands.command(name='radio', help='Toggle 24/7 background radio. Options: lofi, jazz, synth, off')
+    async def radio(self, ctx, genre: str = None):
+        valid = list(IDLE_RADIOS.keys())
+        if not genre or genre.lower() not in valid and genre.lower() != 'off':
+            return await ctx.send(f"設定錯誤。\n使用方式：`F!radio [類型]`\n目前支援頻道：`{', '.join(valid)}` 或輸入 `off` 關閉。")
+            
+        genre = genre.lower()
+        if genre == 'off':
+            if ctx.guild.id in self.active_radios:
+                del self.active_radios[ctx.guild.id]
+                if ctx.guild.id in self.is_playing_radio:
+                    self.is_playing_radio.discard(ctx.guild.id)
+                    if ctx.voice_client: ctx.voice_client.stop()
+                await ctx.send("🚫 已關閉 24H 沉浸模式。")
+            else:
+                await ctx.send("目前沒有開啟背景音樂。")
+        else:
+            self.active_radios[ctx.guild.id] = genre
+            await ctx.send(f"✅ 已設定背景廣播頻道為：**{genre.upper()}**\n*(派對結束空檔時將會為您徹夜聯播！)*")
+            if ctx.voice_client:
+                if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused() and len(self.get_queue(ctx.guild.id)) == 0:
+                    await self.play_next(ctx)
+                elif ctx.guild.id in self.is_playing_radio:
+                    self.is_playing_radio.discard(ctx.guild.id)
+                    ctx.voice_client.stop()
+            else:
+                if ctx.message.author.voice:
+                    await ctx.message.author.voice.channel.connect()
+                    if len(self.get_queue(ctx.guild.id)) == 0:
+                        await self.play_next(ctx)
 
     @commands.command(name='play', help='Plays a song, album, or playlist from YouTube/Spotify/Apple Music/SoundCloud')
     async def play(self, ctx, *, query: str):
@@ -378,6 +430,9 @@ class Music(commands.Cog):
             
         if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
             await self.play_next(ctx)
+        elif ctx.guild.id in self.is_playing_radio:
+            self.is_playing_radio.discard(ctx.guild.id)
+            ctx.voice_client.stop() # Seamless Radio Interrupt
         elif len(queries) == 1:
             title_text = queries[0]
             if str(title_text).startswith('http'):
@@ -427,6 +482,9 @@ class Music(commands.Cog):
 
             if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
                 await self.play_next(ctx)
+            elif ctx.guild.id in self.is_playing_radio:
+                self.is_playing_radio.discard(ctx.guild.id)
+                ctx.voice_client.stop()
             
         except json.JSONDecodeError:
             await msg.edit(content="❌ AI DJ 不小心語無倫次了，請再試一次！")
@@ -498,6 +556,8 @@ class Music(commands.Cog):
 
     @commands.command(name='pause', help='Pauses the current song')
     async def pause(self, ctx):
+        if ctx.guild.id in self.is_playing_radio:
+            return await ctx.send("📻 背景廣播不支援暫停！請使用 `F!radio off` 關閉，或直接點歌。")
         if ctx.voice_client and ctx.voice_client.is_playing():
             ctx.voice_client.pause()
             await ctx.send('⏸️ Paused the music.')
@@ -514,6 +574,8 @@ class Music(commands.Cog):
 
     @commands.command(name='skip', help='Skips the current song')
     async def skip(self, ctx):
+        if ctx.guild.id in self.is_playing_radio:
+            return await ctx.send("📻 背景廣播無法被跳過！請使用 `F!radio off` 關閉，或直接點播歌曲讓系統自動中斷。")
         if ctx.voice_client and (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
             ctx.voice_client.stop()
             await ctx.send('⏭️ Skipped.')
@@ -536,7 +598,10 @@ class Music(commands.Cog):
         queue.insert(0, previous_item)
         self.current_song[ctx.guild.id] = None 
         
-        if ctx.voice_client and (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
+        if ctx.guild.id in self.is_playing_radio:
+            self.is_playing_radio.discard(ctx.guild.id)
+            ctx.voice_client.stop()
+        elif ctx.voice_client and (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
             ctx.voice_client.stop() 
         else:
             await self.play_next(ctx)
@@ -546,6 +611,8 @@ class Music(commands.Cog):
     @commands.command(name='stop', help='Stops music and clears queue')
     async def stop(self, ctx):
         if ctx.voice_client:
+            self.active_radios.pop(ctx.guild.id, None)
+            self.is_playing_radio.discard(ctx.guild.id)
             self.queues[ctx.guild.id] = []
             self.histories[ctx.guild.id] = []
             self.current_song[ctx.guild.id] = None
@@ -668,6 +735,9 @@ class Music(commands.Cog):
                     
             if ctx.voice_client and not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
                 await self.play_next(ctx)
+            elif ctx.voice_client and ctx.guild.id in self.is_playing_radio:
+                self.is_playing_radio.discard(ctx.guild.id)
+                ctx.voice_client.stop()
                 
         except Exception as e:
             await ctx.send(f"❌ 讀取發生錯誤：{e}")
@@ -704,6 +774,8 @@ class Music(commands.Cog):
             await ctx.voice_client.move_to(channel)
             
         if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+            if ctx.guild.id in self.is_playing_radio:
+                self.is_playing_radio.discard(ctx.guild.id)
             ctx.voice_client.stop() 
             await asyncio.sleep(0.5) # Give it half a sec to flush stream
 
