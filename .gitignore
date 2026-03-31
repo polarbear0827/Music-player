@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments (CRITICAL FOR SECURITY)
+.env
+.venv
+env/
+venv/
+ENV/
+
+# External tools
+ffmpeg.exe
+ffprobe.exe
+cookies.txt
+
+# Databases (Prevent leaking user playback history and metrics)
+music_rank.db
+
+# pytest
+.pytest_cache/
