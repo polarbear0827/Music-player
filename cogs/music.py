@@ -11,7 +11,8 @@ import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 import os
 from dotenv import load_dotenv
-
+import json
+from groq import AsyncGroq
 load_dotenv()
 
 # Setup logging
@@ -52,6 +53,14 @@ if spotify_client_id and spotify_client_secret and spotify_client_id != "your_sp
     sp = spotipy.Spotify(auth_manager=auth_manager)
 else:
     log.warning("Spotify credentials not configured correctly. Spotify link parsing will fail.")
+
+# Groq Setup
+groq_api_key = os.getenv('GROQ_API_KEY')
+groq_client = None
+if groq_api_key:
+    groq_client = AsyncGroq(api_key=groq_api_key)
+else:
+    log.warning("GROQ_API_KEY not found. DJ and Chat features will be disabled.")
 
 
 def is_spotify_url(url: str) -> bool:
@@ -107,6 +116,8 @@ def get_track_info_from_spotify(url: str) -> list[str]:
                     tracks.extend(results['items'])
                 
                 for item in tracks:
+                    if len(queries) >= 200:
+                        break
                     track = item.get('track')
                     if track and track.get('artists') and track.get('name'):
                         queries.append(f"{track['artists'][0]['name']} - {track['name']}")
@@ -157,6 +168,7 @@ class Music(commands.Cog):
         self.histories = {}
         # Maps guild_id to currently playing item dict to allow going back
         self.current_song = {}
+        self.remove_locks = set()
         
         # SQLite Database Integration for Ranking System
         self._init_db()
@@ -198,6 +210,24 @@ class Music(commands.Cog):
             self.histories[guild_id] = []
         return self.histories[guild_id]
 
+    async def get_dj_intro(self, song_title: str, requester: str) -> str:
+        if not groq_client: return f"🎵 **Now playing:** {song_title}\n*(Requested by {requester})*"
+        
+        prompt = (f"你現在是在 Discord 上的溫馨音樂廣播 DJ。即將播放的歌是『{song_title}』，點播者是『{requester}』。"
+                  "請用10~30個繁體中文字說一句鼓勵或溫馨的話介紹這首歌，結尾加一個表情符號。不要加上任何其他的解釋或標題。")
+        try:
+            comp = await groq_client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="llama3-70b-8192",
+                temperature=0.7,
+                max_tokens=60
+            )
+            dj_msg = comp.choices[0].message.content.strip()
+            return f"🎙️ **DJ:** 「*{dj_msg}*」\n🎵 **Now playing:** {song_title}"
+        except Exception as e:
+            log.error(f"Groq error: {e}")
+            return f"🎵 **Now playing:** {song_title}\n*(Requested by {requester})*"
+
     async def play_next(self, ctx):
         queue = self.get_queue(ctx.guild.id)
         if len(queue) > 0:
@@ -214,9 +244,12 @@ class Music(commands.Cog):
             try:
                 player = await YTDLSource.from_query(item['query'], loop=self.bot.loop, stream=True)
                 ctx.voice_client.play(player, after=lambda e: self.bot.loop.create_task(self.play_next(ctx)) if e is None else print(f'Player error: {e}'))
-                await ctx.send(f"🎵 **Now playing:** {player.title}\n*(Requested by {item['requester_name']})*")
+                
+                intro_msg = await self.get_dj_intro(player.title, item['requester_name'])
+                await ctx.send(intro_msg)
             except Exception as e:
                 await ctx.send(f"An error occurred while trying to play `{item['query']}`: {e}")
+                await asyncio.sleep(2) # Prevent recursion limit infinite loops
                 await self.play_next(ctx)
         else:
             self.current_song[ctx.guild.id] = None
@@ -316,8 +349,84 @@ class Music(commands.Cog):
             await ctx.send(f"Added to queue: **{title_text}**")
 
 
+    @commands.cooldown(1, 10, commands.BucketType.user)
+    @commands.command(name='dj', help='Ask the AI DJ for a 1-song contextual recommendation')
+    async def dj(self, ctx, *, prompt: str):
+        prompt = prompt[:150] # Prevent giant malicious prompts
+        if not groq_client: return await ctx.send("Groq API 尚未解鎖，無法呼叫 AI DJ！")
+        if not ctx.message.author.voice: return await ctx.send("你必須先進入語音頻道！")
+        
+        msg = await ctx.send("🧠 DJ 正在為您精挑細選專屬音樂...")
+        sys_prompt = ("你是一位溫馨可愛的音樂 DJ。根據使用者的情境，推薦 1 首最適合的歌。"
+                      "嚴格只能回傳純 JSON 陣列，不要有任何 Markdown 或其他文字。"
+                      "格式範例: [\"Artist - Song Name\"]")
+        try:
+            comp = await groq_client.chat.completions.create(
+                messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": prompt}],
+                model="llama3-70b-8192",
+                temperature=0.7,
+                max_tokens=100
+            )
+            raw_text = comp.choices[0].message.content.strip()
+            if raw_text.startswith("```json"): raw_text = raw_text[7:]
+            if raw_text.startswith("```"): raw_text = raw_text[3:]
+            if raw_text.endswith("```"): raw_text = raw_text[:-3]
+            
+            song_list = json.loads(raw_text.strip())
+            if not song_list:
+                return await msg.edit(content="❌ 抱歉，DJ 想不到適合的歌，請換個情境說法！")
+            
+            song = song_list[0]
+            await msg.edit(content=f"✅ DJ 靈光一閃！推薦了這首：**{song}**\n正在為您加入列隊中...")
+            
+            queue = self.get_queue(ctx.guild.id)
+            item = {'query': song, 'requester_id': ctx.author.id, 'requester_name': ctx.author.display_name}
+            queue.append(item)
+
+            channel = ctx.message.author.voice.channel
+            if not ctx.voice_client:
+                await channel.connect()
+            elif ctx.voice_client.channel != channel:
+                await ctx.voice_client.move_to(channel)
+
+            if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
+                await self.play_next(ctx)
+            
+        except json.JSONDecodeError:
+            await msg.edit(content="❌ AI DJ 不小心語無倫次了，請再試一次！")
+        except Exception as e:
+            await msg.edit(content=f"❌ 發生錯誤: {e}")
+
+    @commands.cooldown(1, 10, commands.BucketType.user)
+    @commands.command(name='chat', help='Chat with the AI DJ natively')
+    async def chat(self, ctx, *, message: str):
+        message = message[:150]
+        if not groq_client: return await ctx.send("Groq API 尚未解鎖，無法對話唷！")
+            
+        async with ctx.typing():
+            try:
+                sys_prompt = "你是一個生動可愛、熱情充滿正能量的 Discord 音樂電台 DJ。負責用短短的幾句話，以繁體中文跟群組裡的朋友聊天。結尾加顏文字或 Emoji。"
+                comp = await groq_client.chat.completions.create(
+                    messages=[
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": message}
+                    ],
+                    model="llama3-70b-8192",
+                    temperature=0.8,
+                    max_tokens=200
+                )
+                reply = comp.choices[0].message.content.strip()
+                await ctx.send(f"🎙️ **DJ:** 「{reply}」")
+            except Exception as e:
+                await ctx.send(f"❌ DJ 的麥克風壞掉了: {e}")
+
+
     @commands.command(name='remove', help='Remove a specific track from the queue interactively')
     async def remove(self, ctx):
+        if ctx.guild.id in self.remove_locks:
+            return await ctx.send("⏳ 另一個使用者正在刪歌中，請小等 5 秒鐘！")
+            
+        self.remove_locks.add(ctx.guild.id)
         queue = self.get_queue(ctx.guild.id)
         if not queue:
             return await ctx.send("The queue is currently empty.")
@@ -338,7 +447,7 @@ class Music(commands.Cog):
             return m.author == ctx.message.author and m.channel == ctx.message.channel and m.content.isdigit()
             
         try:
-            choice_msg = await self.bot.wait_for('message', timeout=30.0, check=check)
+            choice_msg = await self.bot.wait_for('message', timeout=5.0, check=check)
             choice = int(choice_msg.content)
             if 1 <= choice <= len(queue[:display_limit]):
                 removed_item = queue.pop(choice - 1)
@@ -346,7 +455,9 @@ class Music(commands.Cog):
             else:
                 await ctx.send("❌ Invalid number selection.")
         except asyncio.TimeoutError:
-            await msg.edit(content="❌ Remove command timed out.")
+            await msg.edit(content="❌ 刪歌操作已超時 (5秒限制)。")
+        finally:
+            self.remove_locks.discard(ctx.guild.id)
 
 
     @commands.command(name='pause', help='Pauses the current song')
@@ -457,6 +568,10 @@ class Music(commands.Cog):
             await ctx.send(board)
         except Exception as e:
             await ctx.send(f"❌ Error fetching rank: {e}")
+
+    async def cog_command_error(self, ctx, error):
+        if isinstance(error, commands.CommandOnCooldown):
+            await ctx.send(f"⏳ 冷靜一下！這招被封印了，請 {round(error.retry_after, 1)} 秒後再試。")
 
 async def setup(bot):
     await bot.add_cog(Music(bot))
