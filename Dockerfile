@@ -2,7 +2,7 @@ FROM python:3.10-slim
 
 # Install system dependencies (ffmpeg for audio, gcc for PyNaCl)
 RUN apt-get update && \
-    apt-get install -y ffmpeg curl build-essential libffi-dev python3-dev && \
+    apt-get install -y ffmpeg curl build-essential libffi-dev python3-dev libsodium-dev libopus-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Set working directory
