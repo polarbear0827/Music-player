@@ -1,5 +1,6 @@
 import asyncio
 import re
+import random
 import logging
 import sqlite3
 import urllib.request
@@ -183,19 +184,54 @@ class Music(commands.Cog):
                     guild_id INTEGER,
                     user_id INTEGER,
                     user_name TEXT,
+                    query TEXT,
+                    title TEXT,
                     play_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            # Attempt to alter existing table safely if upgrading old DB
+            try:
+                self.cursor.execute("ALTER TABLE play_history ADD COLUMN query TEXT")
+                self.cursor.execute("ALTER TABLE play_history ADD COLUMN title TEXT")
+            except Exception:
+                pass
+            
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS playlists (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER,
+                    creator_id INTEGER,
+                    name TEXT,
+                    UNIQUE(guild_id, name)
+                )
+            ''')
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS playlist_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    playlist_id INTEGER,
+                    query TEXT,
+                    FOREIGN KEY(playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
+                )
+            ''')
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS guess_scores (
+                    guild_id INTEGER,
+                    user_id INTEGER,
+                    user_name TEXT,
+                    score INTEGER DEFAULT 0,
+                    PRIMARY KEY(guild_id, user_id)
                 )
             ''')
             self.conn.commit()
         except Exception as e:
             log.error(f"DB Error: Failed to initialize SQLite: {e}")
 
-    def record_play(self, guild_id, user_id, user_name):
+    def record_play(self, guild_id, user_id, user_name, query, title):
         try:
             self.cursor.execute('''
-                INSERT INTO play_history (guild_id, user_id, user_name) 
-                VALUES (?, ?, ?)
-            ''', (guild_id, user_id, user_name))
+                INSERT INTO play_history (guild_id, user_id, user_name, query, title) 
+                VALUES (?, ?, ?, ?, ?)
+            ''', (guild_id, user_id, user_name, query, title))
             self.conn.commit()
         except Exception as e:
             log.error(f"DB Insert Error: {e}")
@@ -239,10 +275,10 @@ class Music(commands.Cog):
             self.current_song[ctx.guild.id] = item
             
             # Write to database (STRICT MODE: Only count score when song actually starts playing)
-            self.bot.loop.run_in_executor(None, self.record_play, ctx.guild.id, item['requester_id'], item['requester_name'])
-            
             try:
                 player = await YTDLSource.from_query(item['query'], loop=self.bot.loop, stream=True)
+                self.bot.loop.run_in_executor(None, self.record_play, ctx.guild.id, item['requester_id'], item['requester_name'], item['query'], player.title)
+                
                 ctx.voice_client.play(player, after=lambda e: self.bot.loop.create_task(self.play_next(ctx)) if e is None else print(f'Player error: {e}'))
                 
                 intro_msg = await self.get_dj_intro(player.title, item['requester_name'])
@@ -572,6 +608,146 @@ class Music(commands.Cog):
     async def cog_command_error(self, ctx, error):
         if isinstance(error, commands.CommandOnCooldown):
             await ctx.send(f"⏳ 冷靜一下！這招被封印了，請 {round(error.retry_after, 1)} 秒後再試。")
+
+    @commands.group(name='playlist', invoke_without_command=True, help='Group command for saving/loading server playlists.')
+    async def playlist(self, ctx):
+        await ctx.send("使用方式：\n`F!playlist save <名稱>` - 儲存當前列隊\n`F!playlist load <名稱>` - 讀取清單\n`F!playlist list` - 檢視所有清單")
+
+    @playlist.command(name='save', help='Save the current queue to a named playlist')
+    async def playlist_save(self, ctx, *, name: str):
+        queue = self.get_queue(ctx.guild.id)
+        if not queue:
+            return await ctx.send("❌ 目前列隊是空的，沒有東西可儲存！")
+            
+        try:
+            self.cursor.execute('INSERT OR IGNORE INTO playlists (guild_id, creator_id, name) VALUES (?, ?, ?)', (ctx.guild.id, ctx.author.id, name))
+            self.conn.commit()
+            
+            self.cursor.execute('SELECT id FROM playlists WHERE guild_id = ? AND name = ?', (ctx.guild.id, name))
+            row = self.cursor.fetchone()
+            if not row:
+                return await ctx.send("❌ 儲存失敗。")
+            pl_id = row[0]
+            
+            self.cursor.execute('DELETE FROM playlist_items WHERE playlist_id = ?', (pl_id,))
+            for item in queue:
+                self.cursor.execute('INSERT INTO playlist_items (playlist_id, query) VALUES (?, ?)', (pl_id, item['query']))
+                
+            self.conn.commit()
+            await ctx.send(f"✅ 成功將 {len(queue)} 首歌儲存至專屬清單：**{name}**")
+        except Exception as e:
+            await ctx.send(f"❌ 儲存發生錯誤：{e}")
+
+    @playlist.command(name='load', help='Load a named playlist into the queue')
+    async def playlist_load(self, ctx, *, name: str):
+        try:
+            self.cursor.execute('SELECT id FROM playlists WHERE guild_id = ? AND name = ?', (ctx.guild.id, name))
+            row = self.cursor.fetchone()
+            if not row:
+                return await ctx.send(f"❌ 找不到名為 **{name}** 的清單！請確認名稱是否正確。")
+                
+            pl_id = row[0]
+            self.cursor.execute('SELECT query FROM playlist_items WHERE playlist_id = ?', (pl_id,))
+            items = self.cursor.fetchall()
+            
+            if not items:
+                return await ctx.send(f"⚠️ 清單 **{name}** 裡面沒有任何歌曲。")
+                
+            queue = self.get_queue(ctx.guild.id)
+            for (query,) in items:
+                queue.append({'query': query, 'requester_id': ctx.author.id, 'requester_name': ctx.author.display_name})
+                
+            await ctx.send(f"✅ 將 **{name}** 中的 {len(items)} 首歌加入列隊！")
+            
+            viewing_channel = ctx.message.author.voice.channel if ctx.message.author.voice else None
+            if viewing_channel:
+                if not ctx.voice_client:
+                    await viewing_channel.connect()
+                elif ctx.voice_client.channel != viewing_channel:
+                    await ctx.voice_client.move_to(viewing_channel)
+                    
+            if ctx.voice_client and not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
+                await self.play_next(ctx)
+                
+        except Exception as e:
+            await ctx.send(f"❌ 讀取發生錯誤：{e}")
+
+    @playlist.command(name='list', help='List all saved playlists for this server')
+    async def playlist_list(self, ctx):
+        self.cursor.execute('SELECT name FROM playlists WHERE guild_id = ?', (ctx.guild.id,))
+        rows = self.cursor.fetchall()
+        if not rows:
+            return await ctx.send("📦 目前這個伺服器還沒有任何私房清單，用 `F!playlist save <名稱>` 建立一個專屬回憶吧！")
+            
+        names = "\n".join([f"• **{r[0]}**" for r in rows])
+        await ctx.send(f"🎵 **本伺服器私房專屬歌單：**\n{names}")
+
+    @commands.cooldown(1, 30, commands.BucketType.guild)
+    @commands.command(name='guess', help='Start a music guessing mini-game based on server history')
+    async def guess(self, ctx):
+        if not ctx.message.author.voice:
+            return await ctx.send("你必須先進入語音頻道！")
+            
+        # Get random historic song that actually has a query and title
+        self.cursor.execute('SELECT query, title FROM play_history WHERE guild_id = ? AND query IS NOT NULL AND title IS NOT NULL ORDER BY RANDOM() LIMIT 1', (ctx.guild.id,))
+        row = self.cursor.fetchone()
+        if not row:
+            return await ctx.send("❌ 你們的點播歷史太少了，無法啟動猜歌遊戲！趕快多點幾首 YouTube 的歌進來吧！")
+            
+        query, title = row
+        clean_title = re.sub(r'[\(\[].*?[\)\]]', '', title).strip().lower() # Remove stuff in brackets for cleaner matching
+        
+        channel = ctx.message.author.voice.channel
+        if not ctx.voice_client:
+            await channel.connect()
+        elif ctx.voice_client.channel != channel:
+            await ctx.voice_client.move_to(channel)
+            
+        if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+            ctx.voice_client.stop() 
+            await asyncio.sleep(0.5) # Give it half a sec to flush stream
+
+        start_time = random.randint(15, 60)
+        game_ffmpeg_options = {
+            'before_options': f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -ss {start_time}',
+            'options': '-vn',
+        }
+        
+        try:
+            msg = await ctx.send("🎲 **猜歌挑戰開始！**\n正在載入神秘片段...\n*(你有 20 秒鐘的時間，第一個在聊天室給出『正確歌名關鍵字』的人就能得分！)*")
+            
+            loop = self.bot.loop
+            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(query, download=False))
+            if 'entries' in data: data = data['entries'][0]
+            filename = data['url']
+            player_audio = discord.FFmpegPCMAudio(filename, **game_ffmpeg_options)
+            
+            ctx.voice_client.play(discord.PCMVolumeTransformer(player_audio, 0.5))
+            
+            def check(m):
+                # Loose matching: >2 chars and substring matching
+                return m.channel == ctx.message.channel and len(m.content) >= 2 and m.content.lower() in clean_title
+
+            try:
+                winner_msg = await self.bot.wait_for('message', timeout=20.0, check=check)
+                ctx.voice_client.stop()
+                
+                # Add score
+                self.cursor.execute('INSERT OR IGNORE INTO guess_scores (guild_id, user_id, user_name, score) VALUES (?, ?, ?, 0)', (ctx.guild.id, winner_msg.author.id, winner_msg.author.display_name))
+                self.cursor.execute('UPDATE guess_scores SET score = score + 1 WHERE guild_id = ? AND user_id = ?', (ctx.guild.id, winner_msg.author.id))
+                self.conn.commit()
+                
+                self.cursor.execute('SELECT score FROM guess_scores WHERE guild_id = ? AND user_id = ?', (ctx.guild.id, winner_msg.author.id))
+                points = self.cursor.fetchone()[0]
+                
+                await ctx.send(f"🎉 恭喜 {winner_msg.author.mention} 猜對了！\n這首歌是：**{title}**\n目前總分：`{points} 分`")
+            except asyncio.TimeoutError:
+                ctx.voice_client.stop()
+                await ctx.send(f"⏰ 時間到！沒有人猜中。\n正確解答是：**{title}**")
+                
+        except Exception as e:
+            log.error(f"Guess game error: {e}")
+            await ctx.send("❌ 遊戲發生錯誤，可能是這首歌被下架了。請再玩一次！")
 
 async def setup(bot):
     await bot.add_cog(Music(bot))
