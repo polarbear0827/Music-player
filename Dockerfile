@@ -1,8 +1,8 @@
 FROM python:3.10-slim
 
-# Install system dependencies (ffmpeg is required for Discord audio streaming)
+# Install system dependencies (ffmpeg for audio, gcc for PyNaCl)
 RUN apt-get update && \
-    apt-get install -y ffmpeg curl && \
+    apt-get install -y ffmpeg curl build-essential libffi-dev python3-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Set working directory
