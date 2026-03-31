@@ -165,6 +165,74 @@ class YTDLSource(discord.PCMVolumeTransformer):
         filename = data['url'] if stream else ytdl.prepare_filename(data)
         return cls(discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS), data=data)
 
+class DashboardView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="⏯", style=discord.ButtonStyle.primary, custom_id="dash_playpause")
+    async def play_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = interaction.guild.voice_client
+        if not vc: return await interaction.response.send_message("不播放時無法操作。", ephemeral=True)
+        if interaction.guild.id in self.cog.is_playing_radio:
+            return await interaction.response.send_message("📻 背景電台無法暫停。", ephemeral=True)
+            
+        if vc.is_playing(): vc.pause()
+        elif vc.is_paused(): vc.resume()
+        await interaction.response.defer()
+        await self.cog.update_dashboard(interaction.guild, interaction.channel)
+
+    @discord.ui.button(label="⏭", style=discord.ButtonStyle.secondary, custom_id="dash_skip")
+    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = interaction.guild.voice_client
+        if not vc: return await interaction.response.send_message("不播放時無法操作。", ephemeral=True)
+        if interaction.guild.id in self.cog.is_playing_radio:
+            return await interaction.response.send_message("📻 電台撥放中無法切歌。", ephemeral=True)
+        vc.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(label="⏹", style=discord.ButtonStyle.danger, custom_id="dash_stop")
+    async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = interaction.guild.voice_client
+        if vc:
+            self.cog.queues[interaction.guild.id] = []
+            self.cog.current_song[interaction.guild.id] = None
+            self.cog.active_radios.pop(interaction.guild.id, None)
+            self.cog.is_playing_radio.discard(interaction.guild.id)
+            vc.stop()
+            await vc.disconnect()
+        await interaction.response.defer()
+        await self.cog.update_dashboard(interaction.guild, interaction.channel)
+
+    @discord.ui.button(label="📻", style=discord.ButtonStyle.success, custom_id="dash_radio")
+    async def toggle_radio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = interaction.guild.id
+        if guild_id in self.cog.active_radios:
+            self.cog.active_radios.pop(guild_id, None)
+            self.cog.is_playing_radio.discard(guild_id)
+            if interaction.guild.voice_client: interaction.guild.voice_client.stop()
+            await interaction.response.send_message("🚫 已關閉背景電台模式。", ephemeral=True)
+        else:
+            self.cog.active_radios[guild_id] = "lofi"
+            await interaction.response.send_message("✅ 為您自動駐紮 Lofi 電台！", ephemeral=True)
+            vc = interaction.guild.voice_client
+            class FakeCtx: pass
+            ctx = FakeCtx()
+            ctx.guild = interaction.guild
+            ctx.channel = interaction.channel
+            ctx.voice_client = vc
+            if vc and not vc.is_playing() and not vc.is_paused() and not self.cog.get_queue(guild_id):
+                self.cog.bot.loop.create_task(self.cog.play_next(ctx))
+            elif not vc:
+                if interaction.user.voice:
+                    await interaction.user.voice.channel.connect()
+                    ctx.voice_client = interaction.guild.voice_client
+                    self.cog.bot.loop.create_task(self.cog.play_next(ctx))
+                else:
+                    return await interaction.response.send_message("請先進入語音頻道！", ephemeral=True)
+        await interaction.response.defer()
+        await self.cog.update_dashboard(interaction.guild, interaction.channel)
+
 
 class Music(commands.Cog):
     def __init__(self, bot):
@@ -178,6 +246,8 @@ class Music(commands.Cog):
         self.remove_locks = set()
         self.active_radios = {}
         self.is_playing_radio = set()
+        self.dashboards = {} # {guild_id: {'channel': TextChannel, 'message': Message}}
+        self.last_dj_msg = {} # {guild_id: str}
         
         # SQLite Database Integration for Ranking System
         self._init_db()
@@ -254,6 +324,57 @@ class Music(commands.Cog):
             self.histories[guild_id] = []
         return self.histories[guild_id]
 
+    async def update_dashboard(self, guild, channel=None):
+        dash_info = self.dashboards.get(guild.id)
+        target_channel = channel if channel else (dash_info['channel'] if dash_info else None)
+        if not target_channel: return
+        
+        queue = self.get_queue(guild.id)
+        current = self.current_song.get(guild.id)
+        is_radio = guild.id in self.is_playing_radio
+        vc = guild.voice_client
+        
+        embed = discord.Embed(title="🎧 DJ 蝦 派對儀表板 (Live)", color=0xFF69B4)
+        
+        if current:
+            title_text = current.get('title', current['query'])
+            if str(title_text).startswith('http'): title_text = "🔗 外部網址"
+            dj_txt = self.last_dj_msg.get(guild.id, "")
+            if dj_txt: embed.description = dj_txt
+            embed.add_field(name="🎵 正在播放", value=f"**{title_text}**\n*(點播者: {current['requester_name']})*", inline=False)
+        elif is_radio:
+            embed.description = ""
+            embed.add_field(name="📻 24H 沉浸電台模式", value=f"**{self.active_radios.get(guild.id, 'Radio').upper()} Radio** 聯播中...", inline=False)
+        else:
+            embed.description = ""
+            embed.add_field(name="💤 已結束播放", value="目前列隊空空如也，趕快點歌吧！", inline=False)
+            
+        up_next = ""
+        for i, item in enumerate(queue[:3]):
+            q_label = str(item['query']) if not str(item['query']).startswith('http') else "🔗 URL"
+            up_next += f"`{i+1}.` {q_label[:40]}...\n"
+        if len(queue) > 3: up_next += f"*(還有 {len(queue)-3} 首歌)*"
+        
+        if up_next: embed.add_field(name="⏳ 待播清單 (Up Next)", value=up_next, inline=False)
+        
+        status = "⏹️ 停止"
+        if vc and vc.is_playing(): status = "▶️ 播放中"
+        elif vc and vc.is_paused(): status = "⏸️ 暫停"
+        if is_radio: status += " (📻電台)"
+        
+        embed.set_footer(text=f"狀態: {status} | 這個面板會自動更新")
+        view = DashboardView(self)
+        
+        try:
+            if dash_info and dash_info.get('message'):
+                await dash_info['message'].edit(embed=embed, view=view)
+            else:
+                msg = await target_channel.send(embed=embed, view=view)
+                self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
+        except discord.errors.NotFound:
+            msg = await target_channel.send(embed=embed, view=view)
+            self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
+
     async def get_dj_intro(self, song_title: str, requester: str) -> str:
         if not groq_client: return f"🎵 **Now playing:** {song_title}\n*(Requested by {requester})*"
         
@@ -282,17 +403,20 @@ class Music(commands.Cog):
                 
             self.current_song[ctx.guild.id] = item
             
-            # Write to database (STRICT MODE: Only count score when song actually starts playing)
             try:
                 player = await YTDLSource.from_query(item['query'], loop=self.bot.loop, stream=True)
                 self.bot.loop.run_in_executor(None, self.record_play, ctx.guild.id, item['requester_id'], item['requester_name'], item['query'], player.title)
                 
+                # Update current song cache with resolved title
+                self.current_song[ctx.guild.id]['title'] = player.title
+                
                 ctx.voice_client.play(player, after=lambda e: self.bot.loop.create_task(self.play_next(ctx)) if e is None else print(f'Player error: {e}'))
                 
                 intro_msg = await self.get_dj_intro(player.title, item['requester_name'])
-                await ctx.send(intro_msg)
+                self.last_dj_msg[ctx.guild.id] = intro_msg
+                await self.update_dashboard(ctx.guild, ctx.channel)
             except Exception as e:
-                await ctx.send(f"An error occurred while trying to play `{item['query']}`: {e}")
+                msg = await ctx.send(f"⚠️ 無法播放 `{item['query']}`: {e}", delete_after=5)
                 await asyncio.sleep(2) # Prevent recursion limit infinite loops
                 await self.play_next(ctx)
         else:
@@ -304,13 +428,15 @@ class Music(commands.Cog):
                 try:
                     player = await YTDLSource.from_query(radio_url, loop=self.bot.loop, stream=True)
                     ctx.voice_client.play(player, after=lambda e: self.bot.loop.create_task(self.play_next(ctx)) if e is None else log.error(f'Radio error: {e}'))
-                    await ctx.send(f"📻 進入 24H 沉浸模式：**{radio_genre.upper()} Radio** 正在為您聯播...")
+                    self.last_dj_msg[ctx.guild.id] = ""
+                    await self.update_dashboard(ctx.guild, ctx.channel)
                 except Exception as e:
-                    await ctx.send(f"❌ 無法連線至 **{radio_genre.upper()}** 直播源 (可能 YouTube 發生異常)。")
+                    await ctx.send(f"❌ 無法連線至直播源。", delete_after=5)
                     self.active_radios.pop(ctx.guild.id, None)
                     self.is_playing_radio.discard(ctx.guild.id)
             else:
-                await ctx.send("Queue empty. Waiting for more tracks.")
+                self.last_dj_msg[ctx.guild.id] = ""
+                await self.update_dashboard(ctx.guild, ctx.channel)
 
     @commands.command(name='radio', help='Toggle 24/7 background radio. Options: lofi, jazz, synth, off')
     async def radio(self, ctx, genre: str = None):
@@ -433,11 +559,16 @@ class Music(commands.Cog):
         elif ctx.guild.id in self.is_playing_radio:
             self.is_playing_radio.discard(ctx.guild.id)
             ctx.voice_client.stop() # Seamless Radio Interrupt
+            await self.update_dashboard(ctx.guild, ctx.channel)
         elif len(queries) == 1:
             title_text = queries[0]
             if str(title_text).startswith('http'):
                 title_text = "Requested Link" 
-            await ctx.send(f"Added to queue: **{title_text}**")
+            await ctx.send(f"✅ 已加入列隊: **{title_text}**", delete_after=3)
+            await self.update_dashboard(ctx.guild, ctx.channel)
+        else:
+            await ctx.send(f"✅ 成功加入 {len(queries)} 首歌曲！", delete_after=3)
+            await self.update_dashboard(ctx.guild, ctx.channel)
 
 
     @commands.cooldown(1, 10, commands.BucketType.user)
