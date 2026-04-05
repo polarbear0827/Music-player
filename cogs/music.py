@@ -4,6 +4,7 @@ import random
 import logging
 import sqlite3
 import urllib.request
+import urllib.parse
 from datetime import datetime
 import discord
 from discord.ext import commands
@@ -63,6 +64,43 @@ async def call_openrouter(messages: list, api_key: str, max_tokens: int, tempera
             raise Exception(f"OpenRouter API Error: {data}")
 
 
+# yt-dlp Configuration
+YTDL_OPTIONS = {
+    'format': 'bestaudio/best',
+    'extractaudio': True,
+    'audioformat': 'mp3',
+    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+    'restrictfilenames': True,
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'auto',
+    'source_address': '0.0.0.0', 
+}
+
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn',
+}
+
+ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+ytdl_search = yt_dlp.YoutubeDL(dict(YTDL_OPTIONS, extract_flat=True, default_search='ytsearch5'))
+
+# Spotify Setup
+spotify_client_id = os.getenv('SPOTIPY_CLIENT_ID')
+spotify_client_secret = os.getenv('SPOTIPY_CLIENT_SECRET')
+
+sp = None
+if spotify_client_id and spotify_client_secret and spotify_client_id != "your_spotify_client_id_here":
+    auth_manager = SpotifyClientCredentials(client_id=spotify_client_id, client_secret=spotify_client_secret)
+    sp = spotipy.Spotify(auth_manager=auth_manager)
+else:
+    log.warning("Spotify credentials not configured correctly. Spotify link parsing will fail.")
+
+
 # 24/7 Radio Dictionary
 IDLE_RADIOS = {
     'lofi': 'https://www.youtube.com/watch?v=jfKfPfyJRdk', # Lofi Girl
@@ -79,6 +117,10 @@ def is_apple_music_url(url: str) -> bool:
 def get_apple_music_title(url: str) -> str:
     """Uses urllib and regex to scrape the title of an Apple Music page."""
     try:
+        # Handle non-ASCII characters in URL
+        parsed_url = urllib.parse.urlparse(url)
+        url = urllib.parse.urlunparse(parsed_url._replace(path=urllib.parse.quote(parsed_url.path)))
+        
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
         with urllib.request.urlopen(req, timeout=5) as response:
             html = response.read().decode('utf-8', errors='ignore')
