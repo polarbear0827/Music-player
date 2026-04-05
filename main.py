@@ -27,7 +27,7 @@ class MusicBot(commands.Bot):
 
     async def setup_hook(self):
         # Load cogs
-        initial_extensions = ['cogs.music']
+        initial_extensions = ['cogs.music', 'cogs.sticker']
         for ext in initial_extensions:
             try:
                 await self.load_extension(ext)

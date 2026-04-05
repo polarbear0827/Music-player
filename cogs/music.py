@@ -13,55 +13,55 @@ from spotipy.oauth2 import SpotifyClientCredentials
 import os
 from dotenv import load_dotenv
 import json
-from groq import AsyncGroq
+import aiohttp
+
 load_dotenv()
+
+# Loop mode constants
+LOOP_OFF = 0
+LOOP_SINGLE = 1
+LOOP_QUEUE = 2
+LOOP_LABELS = {LOOP_OFF: "關閉", LOOP_SINGLE: "單曲循環 🔂", LOOP_QUEUE: "列隊循環 🔁"}
 
 # Setup logging
 log = logging.getLogger(__name__)
 
-# yt-dlp Configuration
-YTDL_OPTIONS = {
-    'format': 'bestaudio/best',
-    'extractaudio': True,
-    'audioformat': 'mp3',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    'restrictfilenames': True,
-    'noplaylist': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0', 
-}
+# OpenRouter / Database Setup
+GLOBAL_OR_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
 
-FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn',
-}
+def get_user_api_key(user_id: int) -> str:
+    """Retrieve API key from SQLite database initialized in sticker.py"""
+    try:
+        conn = sqlite3.connect('data/sticker_keys.db', check_same_thread=False)
+        row = conn.execute('SELECT api_key FROM user_keys WHERE user_id = ?', (user_id,)).fetchone()
+        conn.close()
+        if row: return row[0]
+    except Exception:
+        pass
+    return GLOBAL_OR_API_KEY
 
-ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
-ytdl_search = yt_dlp.YoutubeDL(dict(YTDL_OPTIONS, extract_flat=True, default_search='ytsearch5'))
+async def call_openrouter(messages: list, api_key: str, max_tokens: int, temperature: float = 0.7) -> str:
+    """Make HTTP request to OpenRouter API."""
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "HTTP-Referer": "https://github.com/polarbear0827/Music-player",
+        "X-Title": "Discord DJ Bot",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "minimax/minimax-m2.5:free",
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=payload) as resp:
+            data = await resp.json()
+            if "choices" in data and len(data["choices"]) > 0:
+                return data["choices"][0]["message"]["content"].strip()
+            raise Exception(f"OpenRouter API Error: {data}")
 
-# Spotify Setup
-spotify_client_id = os.getenv('SPOTIPY_CLIENT_ID')
-spotify_client_secret = os.getenv('SPOTIPY_CLIENT_SECRET')
-
-sp = None
-if spotify_client_id and spotify_client_secret and spotify_client_id != "your_spotify_client_id_here":
-    auth_manager = SpotifyClientCredentials(client_id=spotify_client_id, client_secret=spotify_client_secret)
-    sp = spotipy.Spotify(auth_manager=auth_manager)
-else:
-    log.warning("Spotify credentials not configured correctly. Spotify link parsing will fail.")
-
-# Groq Setup
-groq_api_key = os.getenv('GROQ_API_KEY')
-groq_client = None
-if groq_api_key:
-    groq_client = AsyncGroq(api_key=groq_api_key)
-else:
-    log.warning("GROQ_API_KEY not found. DJ and Chat features will be disabled.")
 
 # 24/7 Radio Dictionary
 IDLE_RADIOS = {
@@ -145,15 +145,13 @@ class YTDLSource(discord.PCMVolumeTransformer):
         self.url = data.get('url')
 
     @classmethod
-    async def from_query(cls, query, loop=None, stream=False):
-        loop = loop or asyncio.get_event_loop()
-        
-        # Prepend ytsearch: if it's not a direct URL to explicitly tell yt-dlp to search
+    async def from_query(cls, query, stream=True):
+        # Prepend ytsearch: if it's not a direct URL
         if not query.startswith('http'):
             query = f"ytsearch:{query}"
 
         try:
-            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(query, download=not stream))
+            data = await asyncio.to_thread(ytdl.extract_info, query, **{'download': not stream})
         except Exception as e:
             log.error(f"Error fetching data from yt_dlp: {e}")
             raise e
@@ -173,10 +171,10 @@ class DashboardView(discord.ui.View):
     @discord.ui.button(label="⏯", style=discord.ButtonStyle.primary, custom_id="dash_playpause")
     async def play_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = interaction.guild.voice_client
-        if not vc: return await interaction.response.send_message("不播放時無法操作。", ephemeral=True)
+        if not vc:
+            return await interaction.response.send_message("不播放時無法操作。", ephemeral=True)
         if interaction.guild.id in self.cog.is_playing_radio:
             return await interaction.response.send_message("📻 背景電台無法暫停。", ephemeral=True)
-            
         if vc.is_playing(): vc.pause()
         elif vc.is_paused(): vc.resume()
         await interaction.response.defer()
@@ -185,7 +183,8 @@ class DashboardView(discord.ui.View):
     @discord.ui.button(label="⏭", style=discord.ButtonStyle.secondary, custom_id="dash_skip")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = interaction.guild.voice_client
-        if not vc: return await interaction.response.send_message("不播放時無法操作。", ephemeral=True)
+        if not vc:
+            return await interaction.response.send_message("不播放時無法操作。", ephemeral=True)
         if interaction.guild.id in self.cog.is_playing_radio:
             return await interaction.response.send_message("📻 電台撥放中無法切歌。", ephemeral=True)
         vc.stop()
@@ -204,33 +203,54 @@ class DashboardView(discord.ui.View):
         await interaction.response.defer()
         await self.cog.update_dashboard(interaction.guild, interaction.channel)
 
+    @discord.ui.button(label="🔁", style=discord.ButtonStyle.secondary, custom_id="dash_loop")
+    async def toggle_loop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gid = interaction.guild.id
+        current = self.cog.loop_mode.get(gid, LOOP_OFF)
+        next_mode = (current + 1) % 3  # cycle: 0→1→2→0
+        self.cog.loop_mode[gid] = next_mode
+        await interaction.response.send_message(
+            f"🔁 Loop 模式已切換為：**{LOOP_LABELS[next_mode]}**", ephemeral=True
+        )
+        await self.cog.update_dashboard(interaction.guild, interaction.channel)
+
+    @discord.ui.button(label="🔀", style=discord.ButtonStyle.secondary, custom_id="dash_shuffle")
+    async def shuffle_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gid = interaction.guild.id
+        queue = self.cog.get_queue(gid)
+        if len(queue) < 2:
+            return await interaction.response.send_message("列隊太短，無法打亂！", ephemeral=True)
+        random.shuffle(queue)
+        await interaction.response.send_message(f"🔀 已隨機打亂 {len(queue)} 首歌的順序！", ephemeral=True)
+        await self.cog.update_dashboard(interaction.guild, interaction.channel)
+
     @discord.ui.button(label="📻", style=discord.ButtonStyle.success, custom_id="dash_radio")
     async def toggle_radio(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild_id = interaction.guild.id
+        await interaction.response.defer(ephemeral=True)  # Always defer first to avoid double-response
         if guild_id in self.cog.active_radios:
             self.cog.active_radios.pop(guild_id, None)
             self.cog.is_playing_radio.discard(guild_id)
-            if interaction.guild.voice_client: interaction.guild.voice_client.stop()
-            await interaction.response.send_message("🚫 已關閉背景電台模式。", ephemeral=True)
+            if interaction.guild.voice_client:
+                interaction.guild.voice_client.stop()
+            await interaction.followup.send("🚫 已關閉背景電台模式。", ephemeral=True)
         else:
-            self.cog.active_radios[guild_id] = "lofi"
-            await interaction.response.send_message("✅ 為您自動駐紮 Lofi 電台！", ephemeral=True)
             vc = interaction.guild.voice_client
-            class FakeCtx: pass
+            if not vc:
+                if not interaction.user.voice:
+                    return await interaction.followup.send("請先進入語音頻道！", ephemeral=True)
+                vc = await interaction.user.voice.channel.connect()
+            self.cog.active_radios[guild_id] = "lofi"
+            await interaction.followup.send("✅ 為您自動駐紮 Lofi 電台！", ephemeral=True)
+
+            class FakeCtx:
+                pass
             ctx = FakeCtx()
             ctx.guild = interaction.guild
             ctx.channel = interaction.channel
             ctx.voice_client = vc
-            if vc and not vc.is_playing() and not vc.is_paused() and not self.cog.get_queue(guild_id):
+            if not vc.is_playing() and not vc.is_paused() and not self.cog.get_queue(guild_id):
                 self.cog.bot.loop.create_task(self.cog.play_next(ctx))
-            elif not vc:
-                if interaction.user.voice:
-                    await interaction.user.voice.channel.connect()
-                    ctx.voice_client = interaction.guild.voice_client
-                    self.cog.bot.loop.create_task(self.cog.play_next(ctx))
-                else:
-                    return await interaction.response.send_message("請先進入語音頻道！", ephemeral=True)
-        await interaction.response.defer()
         await self.cog.update_dashboard(interaction.guild, interaction.channel)
 
 
@@ -248,13 +268,28 @@ class Music(commands.Cog):
         self.is_playing_radio = set()
         self.dashboards = {} # {guild_id: {'channel': TextChannel, 'message': Message}}
         self.last_dj_msg = {} # {guild_id: str}
+        # Loop mode: 0=off, 1=single, 2=queue
+        self.loop_mode = {} # {guild_id: int}
+        # Volume: 0.0-1.0 per guild
+        self.volumes = {} # {guild_id: float}
+        # Song start time for progress bar
+        self.song_start_time = {} # {guild_id: float}
         
         # SQLite Database Integration for Ranking System
         self._init_db()
 
     def _init_db(self):
+        os.makedirs('data', exist_ok=True)
+        import shutil
+        if os.path.exists('music_rank.db') and not os.path.exists('data/music_rank.db'):
+            try:
+                shutil.move('music_rank.db', 'data/music_rank.db')
+                log.info("Migrated music_rank.db to data folder")
+            except Exception as e:
+                log.error(f"Failed to migrate db: {e}")
+
         try:
-            self.conn = sqlite3.connect('music_rank.db', check_same_thread=False)
+            self.conn = sqlite3.connect('data/music_rank.db', check_same_thread=False)
             self.cursor = self.conn.cursor()
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS play_history (
@@ -324,6 +359,23 @@ class Music(commands.Cog):
             self.histories[guild_id] = []
         return self.histories[guild_id]
 
+    def _build_progress_bar(self, guild_id: int, duration) -> str:
+        """Build a ██████░░░░ style progress bar."""
+        if not duration:
+            return ""
+        try:
+            elapsed = asyncio.get_event_loop().time() - self.song_start_time.get(guild_id, 0)
+            elapsed = min(elapsed, duration)
+            ratio = elapsed / duration
+            filled = int(ratio * 12)
+            bar = '█' * filled + '░' * (12 - filled)
+            def fmt(s):
+                s = int(s)
+                return f"{s//60}:{s%60:02d}"
+            return f"`{bar}` {fmt(elapsed)} / {fmt(duration)}"
+        except Exception:
+            return ""
+
     async def update_dashboard(self, guild, channel=None):
         dash_info = self.dashboards.get(guild.id)
         target_channel = channel if channel else (dash_info['channel'] if dash_info else None)
@@ -333,6 +385,8 @@ class Music(commands.Cog):
         current = self.current_song.get(guild.id)
         is_radio = guild.id in self.is_playing_radio
         vc = guild.voice_client
+        loop_mode = self.loop_mode.get(guild.id, LOOP_OFF)
+        volume = int(self.volumes.get(guild.id, 0.5) * 100)
         
         embed = discord.Embed(title="🎧 DJ 蝦 派對儀表板 (Live)", color=0xFF69B4)
         
@@ -341,7 +395,11 @@ class Music(commands.Cog):
             if str(title_text).startswith('http'): title_text = "🔗 外部網址"
             dj_txt = self.last_dj_msg.get(guild.id, "")
             if dj_txt: embed.description = dj_txt
-            embed.add_field(name="🎵 正在播放", value=f"**{title_text}**\n*(點播者: {current['requester_name']})*", inline=False)
+            progress = self._build_progress_bar(guild.id, current.get('duration'))
+            now_val = f"**{title_text}**\n*(點播者: {current['requester_name']})*"
+            if progress:
+                now_val += f"\n{progress}"
+            embed.add_field(name="🎵 正在播放", value=now_val, inline=False)
         elif is_radio:
             embed.description = ""
             embed.add_field(name="📻 24H 沉浸電台模式", value=f"**{self.active_radios.get(guild.id, 'Radio').upper()} Radio** 聯播中...", inline=False)
@@ -362,7 +420,7 @@ class Music(commands.Cog):
         elif vc and vc.is_paused(): status = "⏸️ 暫停"
         if is_radio: status += " (📻電台)"
         
-        embed.set_footer(text=f"狀態: {status} | 這個面板會自動更新")
+        embed.set_footer(text=f"狀態: {status} | 🔁 {LOOP_LABELS[loop_mode]} | 🔊 {volume}% | 這個面板會自動更新")
         view = DashboardView(self)
         
         try:
@@ -375,50 +433,69 @@ class Music(commands.Cog):
             msg = await target_channel.send(embed=embed, view=view)
             self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
 
-    async def get_dj_intro(self, song_title: str, requester: str) -> str:
-        if not groq_client: return f"🎵 **Now playing:** {song_title}\n*(Requested by {requester})*"
+    async def get_dj_intro(self, song_title: str, requester: str, requester_id: int = None) -> str:
+        api_key = get_user_api_key(requester_id) if requester_id else GLOBAL_OR_API_KEY
         
         prompt = (f"你現在是在 Discord 上的溫馨音樂廣播 DJ。即將播放的歌是『{song_title}』，點播者是『{requester}』。"
                   "請用10~30個繁體中文字說一句鼓勵或溫馨的話介紹這首歌，結尾加一個表情符號。不要加上任何其他的解釋或標題。")
         try:
-            comp = await groq_client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
-                model="llama3-70b-8192",
-                temperature=0.7,
-                max_tokens=60
-            )
-            dj_msg = comp.choices[0].message.content.strip()
+            dj_msg = await call_openrouter([{"role": "user", "content": prompt}], api_key, max_tokens=60)
             return f"🎙️ **DJ:** 「*{dj_msg}*」\n🎵 **Now playing:** {song_title}"
         except Exception as e:
-            log.error(f"Groq error: {e}")
+            log.error(f"OpenRouter error: {e}")
             return f"🎵 **Now playing:** {song_title}\n*(Requested by {requester})*"
 
-    async def play_next(self, ctx):
+    async def play_next(self, ctx, *, _retry: int = 0):
         queue = self.get_queue(ctx.guild.id)
-        if len(queue) > 0:
-            item = queue.pop(0)
-            
-            if ctx.guild.id in self.current_song and self.current_song[ctx.guild.id] is not None:
-                self.get_history(ctx.guild.id).append(self.current_song[ctx.guild.id])
-                
+        loop_mode = self.loop_mode.get(ctx.guild.id, LOOP_OFF)
+
+        if len(queue) > 0 or (loop_mode == LOOP_SINGLE and self.current_song.get(ctx.guild.id)):
+            # Single loop: re-add the current song to front without popping
+            if loop_mode == LOOP_SINGLE and self.current_song.get(ctx.guild.id):
+                item = self.current_song[ctx.guild.id].copy()
+            else:
+                item = queue.pop(0)
+                # Queue loop: push to back
+                if loop_mode == LOOP_QUEUE:
+                    queue.append(item)
+
+                if self.current_song.get(ctx.guild.id) is not None:
+                    self.get_history(ctx.guild.id).append(self.current_song[ctx.guild.id])
+
             self.current_song[ctx.guild.id] = item
-            
+
             try:
-                player = await YTDLSource.from_query(item['query'], loop=self.bot.loop, stream=True)
-                self.bot.loop.run_in_executor(None, self.record_play, ctx.guild.id, item['requester_id'], item['requester_name'], item['query'], player.title)
-                
+                player = await YTDLSource.from_query(item['query'], stream=True)
+                asyncio.create_task(
+                    asyncio.to_thread(self.record_play, ctx.guild.id, item['requester_id'], item['requester_name'], item['query'], player.title)
+                )
+
+                # Set volume
+                player.volume = self.volumes.get(ctx.guild.id, 0.5)
+
                 # Update current song cache with resolved title
                 self.current_song[ctx.guild.id]['title'] = player.title
-                
-                ctx.voice_client.play(player, after=lambda e: self.bot.loop.create_task(self.play_next(ctx)) if e is None else print(f'Player error: {e}'))
-                
-                intro_msg = await self.get_dj_intro(player.title, item['requester_name'])
+                self.current_song[ctx.guild.id]['duration'] = player.data.get('duration')
+                self.song_start_time[ctx.guild.id] = asyncio.get_event_loop().time()
+
+                ctx.voice_client.play(
+                    player,
+                    after=lambda e: self.bot.loop.create_task(
+                        self.play_next(ctx)
+                    ) if e is None else log.error(f'Player error: {e}')
+                )
+
+                intro_msg = await self.get_dj_intro(player.title, item['requester_name'], item['requester_id'])
                 self.last_dj_msg[ctx.guild.id] = intro_msg
                 await self.update_dashboard(ctx.guild, ctx.channel)
             except Exception as e:
-                msg = await ctx.send(f"⚠️ 無法播放 `{item['query']}`: {e}", delete_after=5)
-                await asyncio.sleep(2) # Prevent recursion limit infinite loops
-                await self.play_next(ctx)
+                log.error(f"play_next error (retry {_retry}): {e}")
+                if _retry < 3:
+                    await ctx.send(f"⚠️ 無法播放 `{item['query']}`: {e}，嘗試下一首...", delete_after=5)
+                    await asyncio.sleep(2)
+                    await self.play_next(ctx, _retry=_retry + 1)
+                else:
+                    await ctx.send("❌ 連續 3 首無法播放，已停止。", delete_after=5)
         else:
             self.current_song[ctx.guild.id] = None
             if ctx.guild.id in self.active_radios:
@@ -426,7 +503,7 @@ class Music(commands.Cog):
                 radio_url = IDLE_RADIOS[radio_genre]
                 self.is_playing_radio.add(ctx.guild.id)
                 try:
-                    player = await YTDLSource.from_query(radio_url, loop=self.bot.loop, stream=True)
+                    player = await YTDLSource.from_query(radio_url, stream=True)
                     ctx.voice_client.play(player, after=lambda e: self.bot.loop.create_task(self.play_next(ctx)) if e is None else log.error(f'Radio error: {e}'))
                     self.last_dj_msg[ctx.guild.id] = ""
                     await self.update_dashboard(ctx.guild, ctx.channel)
@@ -513,12 +590,12 @@ class Music(commands.Cog):
             msg = await ctx.send(f"🔍 Searching YouTube for: `{query}`...")
             try:
                 search_query = f"ytsearch5:{query}"
-                data = await self.bot.loop.run_in_executor(None, lambda: ytdl_search.extract_info(search_query, download=False))
+                data = await asyncio.to_thread(ytdl_search.extract_info, search_query, **{'download': False})
                 entries = data.get('entries', [])
                 if not entries:
                     return await msg.edit(content="❌ No results found on YouTube.")
                     
-                options_text = "**Select a track by replying with its number (1-5) within 30 seconds:**\n"
+                options_text = "**選擇一首歌（30秒內回覆數字 1-5）：**\n"
                 for i, entry in enumerate(entries, 1):
                     options_text += f"**{i}.** {entry.get('title')}\n"
                     
@@ -575,7 +652,6 @@ class Music(commands.Cog):
     @commands.command(name='dj', help='Ask the AI DJ for a 1-song contextual recommendation')
     async def dj(self, ctx, *, prompt: str):
         prompt = prompt[:150] # Prevent giant malicious prompts
-        if not groq_client: return await ctx.send("Groq API 尚未解鎖，無法呼叫 AI DJ！")
         if not ctx.message.author.voice: return await ctx.send("你必須先進入語音頻道！")
         
         msg = await ctx.send("🧠 DJ 正在為您精挑細選專屬音樂...")
@@ -583,13 +659,10 @@ class Music(commands.Cog):
                       "嚴格只能回傳純 JSON 陣列，不要有任何 Markdown 或其他文字。"
                       "格式範例: [\"Artist - Song Name\"]")
         try:
-            comp = await groq_client.chat.completions.create(
-                messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": prompt}],
-                model="llama3-70b-8192",
-                temperature=0.7,
-                max_tokens=100
-            )
-            raw_text = comp.choices[0].message.content.strip()
+            api_key = get_user_api_key(ctx.author.id)
+            messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": prompt}]
+            raw_text = await call_openrouter(messages, api_key, max_tokens=100)
+            
             if raw_text.startswith("```json"): raw_text = raw_text[7:]
             if raw_text.startswith("```"): raw_text = raw_text[3:]
             if raw_text.endswith("```"): raw_text = raw_text[:-3]
@@ -626,21 +699,15 @@ class Music(commands.Cog):
     @commands.command(name='chat', help='Chat with the AI DJ natively')
     async def chat(self, ctx, *, message: str):
         message = message[:150]
-        if not groq_client: return await ctx.send("Groq API 尚未解鎖，無法對話唷！")
-            
         async with ctx.typing():
             try:
                 sys_prompt = "你是一個生動可愛、熱情充滿正能量的 Discord 音樂電台 DJ。負責用短短的幾句話，以繁體中文跟群組裡的朋友聊天。結尾加顏文字或 Emoji。"
-                comp = await groq_client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": sys_prompt},
-                        {"role": "user", "content": message}
-                    ],
-                    model="llama3-70b-8192",
-                    temperature=0.8,
-                    max_tokens=200
-                )
-                reply = comp.choices[0].message.content.strip()
+                messages = [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": message}
+                ]
+                api_key = get_user_api_key(ctx.author.id)
+                reply = await call_openrouter(messages, api_key, max_tokens=200, temperature=0.8)
                 await ctx.send(f"🎙️ **DJ:** 「{reply}」")
             except Exception as e:
                 await ctx.send(f"❌ DJ 的麥克風壞掉了: {e}")
@@ -672,7 +739,7 @@ class Music(commands.Cog):
             return m.author == ctx.message.author and m.channel == ctx.message.channel and m.content.isdigit()
             
         try:
-            choice_msg = await self.bot.wait_for('message', timeout=5.0, check=check)
+            choice_msg = await self.bot.wait_for('message', timeout=30.0, check=check)
             choice = int(choice_msg.content)
             if 1 <= choice <= len(queue[:display_limit]):
                 removed_item = queue.pop(choice - 1)
@@ -680,7 +747,7 @@ class Music(commands.Cog):
             else:
                 await ctx.send("❌ Invalid number selection.")
         except asyncio.TimeoutError:
-            await msg.edit(content="❌ 刪歌操作已超時 (5秒限制)。")
+            await msg.edit(content="❌ 刪歌操作已超時 (30秒限制)。")
         finally:
             self.remove_locks.discard(ctx.guild.id)
 
@@ -738,6 +805,68 @@ class Music(commands.Cog):
             await self.play_next(ctx)
             
         await ctx.send('⏮️ Going back to previous track.')
+
+    @commands.command(name='volume', aliases=['vol'], help='設定音量 (1-100)，例如 F!volume 80')
+    async def volume(self, ctx, vol: int):
+        if not 1 <= vol <= 100:
+            return await ctx.send("❌ 音量必須介於 1 到 100 之間！")
+        self.volumes[ctx.guild.id] = vol / 100
+        if ctx.voice_client and ctx.voice_client.source:
+            ctx.voice_client.source.volume = vol / 100
+        await ctx.send(f"🔊 音量已設定為 **{vol}%**")
+        await self.update_dashboard(ctx.guild, ctx.channel)
+
+    @commands.command(name='loop', help='切換 Loop 模式：off → single → queue → off')
+    async def loop(self, ctx):
+        gid = ctx.guild.id
+        current = self.loop_mode.get(gid, LOOP_OFF)
+        next_mode = (current + 1) % 3
+        self.loop_mode[gid] = next_mode
+        await ctx.send(f"🔁 Loop 模式已切換為：**{LOOP_LABELS[next_mode]}**")
+        await self.update_dashboard(ctx.guild, ctx.channel)
+
+    @commands.command(name='shuffle', help='隨機打亂目前的播放列隊')
+    async def shuffle(self, ctx):
+        queue = self.get_queue(ctx.guild.id)
+        if len(queue) < 2:
+            return await ctx.send("❌ 列隊至少需要 2 首歌才能打亂！")
+        random.shuffle(queue)
+        await ctx.send(f"🔀 已隨機打亂 **{len(queue)}** 首歌的順序！")
+        await self.update_dashboard(ctx.guild, ctx.channel)
+
+    @commands.command(name='np', aliases=['nowplaying'], help='顯示目前正在播放的歌曲資訊')
+    async def nowplaying(self, ctx):
+        current = self.current_song.get(ctx.guild.id)
+        is_radio = ctx.guild.id in self.is_playing_radio
+        vc = ctx.voice_client
+
+        if is_radio:
+            genre = self.active_radios.get(ctx.guild.id, 'lofi').upper()
+            return await ctx.send(f"📻 目前正在播放 **{genre} Radio** 24H 沉浸電台。")
+
+        if not current:
+            return await ctx.send("❌ 目前沒有正在播放的歌曲。")
+
+        title = current.get('title', current['query'])
+        if str(title).startswith('http'):
+            title = "🔗 外部網址"
+
+        loop_mode = self.loop_mode.get(ctx.guild.id, LOOP_OFF)
+        volume = int(self.volumes.get(ctx.guild.id, 0.5) * 100)
+
+        embed = discord.Embed(title="🎵 Now Playing", color=0xFF69B4)
+        embed.add_field(name="歌曲", value=f"**{title}**", inline=False)
+        embed.add_field(name="點播者", value=current['requester_name'], inline=True)
+        embed.add_field(name="🔁 Loop", value=LOOP_LABELS[loop_mode], inline=True)
+        embed.add_field(name="🔊 音量", value=f"{volume}%", inline=True)
+
+        progress = self._build_progress_bar(ctx.guild.id, current.get('duration'))
+        if progress:
+            embed.add_field(name="進度", value=progress, inline=False)
+
+        status = "▶️ 播放中" if vc and vc.is_playing() else "⏸️ 暫停中"
+        embed.set_footer(text=f"狀態: {status}")
+        await ctx.send(embed=embed)
 
     @commands.command(name='stop', help='Stops music and clears queue')
     async def stop(self, ctx):

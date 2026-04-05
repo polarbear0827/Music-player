@@ -20,3 +20,7 @@ music_rank.db
 
 # pytest
 .pytest_cache/
+
+# Bot data directories and additional databases
+data/
+sticker_keys.db
