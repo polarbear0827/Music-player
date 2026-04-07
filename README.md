@@ -23,6 +23,12 @@
 - **伺服器專屬私房歌單 (`F!playlist`)**：一鍵將當前 Queue 裡的所有歌曲封存為伺服器的專屬歌單，隨時 `load` 回來開趴。
 - **24/7 不打烊沉浸電台 (`F!radio`)**：當歌曲播完時，自動無縫切換至 **Lofi Girl / Jazz / Synthwave** YouTube 24H 直播源。有人點歌時會「自動讓位插隊」，播完再切回廣播！
 
+### 🧽 海綿寶寶迷因貼圖系統 (Sticker System)
+- **海量資料庫**：內建超過 **8,200 張** 海綿寶寶經典截圖與迷因，支援模糊關鍵字搜尋。
+- **精準搜尋 (`F!sticker`)**：輸入關鍵字，機器人會列出最接近的 5 個選項，由你點擊按鈕決定送出哪一張。
+- **隨機驚喜 (`F!ssr`)**：隨機抽出一張經典貼圖，讓聊天室瞬間充滿海綿寶寶的魔力。
+- **個人化 API 金鑰**：使用者可透過 `F!setkey` 綁定自己的 OpenRouter Key，享受專屬的 AI 推理頻寬，不受全域限制影響。
+
 ### 💿 多平台點歌直連
 - 🎥 **YouTube**: 輸入歌曲名稱自動回傳精華前 5 名選單供你點選 (`ytsearch5`)
 - 🍏 **Apple Music**: 獨家原生輕量爬蟲機制，Apple Music 連結一樣通吃！
@@ -96,12 +102,22 @@ python main.py
 | `F!dj <情境>` | **[AI 智選]** 告訴 DJ 你當下的心情，讓它直接為你上 1 首神曲 |
 | `F!chat <內容>` | **[AI 對話]** 跟溫馨電台 DJ 快樂聊天打招呼 |
 | `F!play <網址/名稱>` | 手動呼叫機器人播放 / 搜尋 YouTube, Spotify, Apple 等歌曲 |
+| `F!np` / `F!nowplaying` | 顯示當前詳細播放資訊（含進度條、點播者、Loop 狀態） |
 | `F!pause` / `F!resume` | 暫停音樂 / 繼續播放 |
 | `F!skip` / `F!stop` | 跳過當前歌曲 / 停止播放、清空所有排隊列與記憶並離開頻道 |
 | `F!back` | **[神級還原]** 切回上一首播放過的歌曲 |
 | `F!queue` | 檢視當前列隊名單 |
+| `F!shuffle` / `F!loop` | 打亂列隊 / 切換循環模式 (Off / Single / Queue) |
+| `F!volume <1-100>` | 設定播放音量 |
 | `F!remove` | **[安全名單]** 選取並刪除 Queue 中的指定歌曲 (具備排他防搶鎖) |
 | `F!rank [參數]` | 結算全伺服器最愛點歌的 DJ 積分榜 (支援 day/month/year) |
+| `F!guess` | **[小遊戲]** 啟動音樂猜猜看（基於伺服器歷史點歌紀錄） |
+| `F!playlist <指令>` | **[歌單管理]** 支援 `save`, `load`, `list` 伺服器專屬歌單 |
+| `F!radio <類型>` | **[24H 電台]** 設定背景頻道 (lofi, jazz, synth, off) |
+| `F!ss <關鍵字>` | **[貼圖]** 搜尋海綿寶寶貼圖，並透過按鈕選取送出 |
+| `F!ssr` | **[貼圖]** 隨機送出一張海綿寶寶貼圖 |
+| `F!setkey <key>` | **[API 設定]** 綁定個人的 OpenRouter API Key (推薦在私訊使用) |
+| `F!delkey` | **[API 設定]** 刪除個人的 OpenRouter API Key |
 
 ---
-*Built with Llama 3 & Antigravity.*
+*Built with Minimax M2.5 & Antigravity.*
