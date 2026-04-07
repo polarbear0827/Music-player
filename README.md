@@ -95,7 +95,7 @@ python main.py
 
 ## 🕹️ 指令大全 (Commands)
 
-*所有的指令開頭皆為 `F!`*
+*所有的指令開頭皆為 `F!`，且**指令名稱不分大小寫**（例如 `F!play` 與 `f!PLAY` 效果相同）。*
 
 | 指令 | 說明 |
 | :--- | :--- |
@@ -108,16 +108,17 @@ python main.py
 | `F!back` | **[神級還原]** 切回上一首播放過的歌曲 |
 | `F!queue` | 檢視當前列隊名單 |
 | `F!shuffle` / `F!loop` | 打亂列隊 / 切換循環模式 (Off / Single / Queue) |
-| `F!volume <1-100>` | 設定播放音量 |
+| `F!volume <1-100>` | 設定播放音量 (縮寫: `F!vol`) |
 | `F!remove` | **[安全名單]** 選取並刪除 Queue 中的指定歌曲 (具備排他防搶鎖) |
 | `F!rank [參數]` | 結算全伺服器最愛點歌的 DJ 積分榜 (支援 day/month/year) |
-| `F!guess` | **[小遊戲]** 啟動音樂猜猜看（基於伺服器歷史點歌紀錄） |
+| `F!guess` | **[小遊戲]** 啟動音樂猜猜看（基於伺服器歷史點播紀錄） |
 | `F!playlist <指令>` | **[歌單管理]** 支援 `save`, `load`, `list` 伺服器專屬歌單 |
 | `F!radio <類型>` | **[24H 電台]** 設定背景頻道 (lofi, jazz, synth, off) |
-| `F!ss <關鍵字>` | **[貼圖]** 搜尋海綿寶寶貼圖，並透過按鈕選取送出 |
-| `F!ssr` | **[貼圖]** 隨機送出一張海綿寶寶貼圖 |
+| `F!sticker <關鍵字>` | **[貼圖]** 搜尋海綿寶寶貼圖，並透過按鈕選取送出 (縮寫: `F!ss`) |
+| `F!ssr` | **[貼圖]** 隨機送出一張海綿寶寶貼圖 (縮寫: `F!sticker_random`) |
 | `F!setkey <key>` | **[API 設定]** 綁定個人的 OpenRouter API Key (推薦在私訊使用) |
 | `F!delkey` | **[API 設定]** 刪除個人的 OpenRouter API Key |
+| `F!sticker_count` | 統計目前海量貼圖資料庫的總數 |
 
 ---
 *Built with Minimax M2.5 & Antigravity.*
