@@ -56,12 +56,23 @@ async def call_openrouter(messages: list, api_key: str, max_tokens: int, tempera
         "temperature": temperature,
         "max_tokens": max_tokens
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=payload) as resp:
-            data = await resp.json()
-            if "choices" in data and len(data["choices"]) > 0:
-                return data["choices"][0]["message"]["content"].strip()
-            raise Exception(f"OpenRouter API Error: {data}")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=20) as resp:
+                if resp.status != 200:
+                    err_data = await resp.text()
+                    raise Exception(f"OpenRouter HTTP {resp.status}: {err_data}")
+                
+                data = await resp.json()
+                if "choices" in data and len(data["choices"]) > 0:
+                    content = data["choices"][0].get("message", {}).get("content")
+                    if content is not None:
+                        return str(content).strip()
+                    return "..." # Fallback for empty content
+                raise Exception(f"OpenRouter Unexpected Response: {data}")
+    except Exception as e:
+        log.error(f"call_openrouter error: {e}")
+        raise e
 
 
 # yt-dlp Configuration
@@ -82,8 +93,8 @@ YTDL_OPTIONS = {
 }
 
 FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn',
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 10M -analyzeduration 10M',
+    'options': '-vn -filter:a "volume=1.0"',
 }
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
@@ -129,7 +140,7 @@ def get_apple_music_title(url: str) -> str:
                 title = match.group(1).replace(" on Apple Music", "")
                 title = title.replace(" - Single", "").replace(" - EP", "")
                 title = title.replace("\u200e", "") # Remove zero-width spaces
-                return title
+                return f"{title} (Official Audio)"
     except Exception as e:
         log.error(f"Apple Music scraping error: {e}")
     return url # Fallback to URL
@@ -146,14 +157,14 @@ def get_track_info_from_spotify(url: str) -> list[str]:
             match = re.search(r"track/([a-zA-Z0-9]+)", url)
             if match:
                 track = sp.track(match.group(1))
-                queries.append(f"{track['artists'][0]['name']} - {track['name']}")
+                queries.append(f"{track['artists'][0]['name']} - {track['name']} (Official Audio)")
                 
         elif "/album/" in url:
             match = re.search(r"album/([a-zA-Z0-9]+)", url)
             if match:
                 results = sp.album_tracks(match.group(1))
                 for item in results['items']:
-                    queries.append(f"{item['artists'][0]['name']} - {item['name']}")
+                    queries.append(f"{item['artists'][0]['name']} - {item['name']} (Official Audio)")
                     
         elif "/playlist/" in url:
             match = re.search(r"playlist/([a-zA-Z0-9]+)", url)
@@ -169,7 +180,7 @@ def get_track_info_from_spotify(url: str) -> list[str]:
                         break
                     track = item.get('track')
                     if track and track.get('artists') and track.get('name'):
-                        queries.append(f"{track['artists'][0]['name']} - {track['name']}")
+                        queries.append(f"{track['artists'][0]['name']} - {track['name']} (Official Audio)")
                         
     except Exception as e:
         log.error(f"Spotify URL parsing error: {e}")
@@ -190,7 +201,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
     async def from_query(cls, query, stream=True):
         # Prepend ytsearch: if it's not a direct URL
         if not query.startswith('http'):
-            query = f"ytsearch:{query}"
+            query = f"ytsearch:{query} (Official Audio)"
 
         try:
             data = await asyncio.to_thread(ytdl.extract_info, query, **{'download': not stream})
@@ -286,11 +297,21 @@ class DashboardView(discord.ui.View):
             await interaction.followup.send("✅ 為您自動駐紮 Lofi 電台！", ephemeral=True)
 
             class FakeCtx:
-                pass
-            ctx = FakeCtx()
-            ctx.guild = interaction.guild
-            ctx.channel = interaction.channel
-            ctx.voice_client = vc
+                def __init__(self, bot, guild, channel, vc):
+                    self.bot = bot
+                    self.guild = guild
+                    self.channel = channel
+                    self.voice_client = vc
+
+                async def send(self, *args, **kwargs):
+                    # Mock send: logs instead of sending message to avoid API calls for radio
+                    log.info(f"[Radio-FakeCtx] Suppression: {args} {kwargs}")
+                    return None
+
+                async def defer(self, *args, **kwargs):
+                    return None
+
+            ctx = FakeCtx(self.cog.bot, interaction.guild, interaction.channel, vc)
             if not vc.is_playing() and not vc.is_paused() and not self.cog.get_queue(guild_id):
                 self.cog.bot.loop.create_task(self.cog.play_next(ctx))
         await self.cog.update_dashboard(interaction.guild, interaction.channel)
@@ -316,6 +337,7 @@ class Music(commands.Cog):
         self.volumes = {} # {guild_id: float}
         # Song start time for progress bar
         self.song_start_time = {} # {guild_id: float}
+        self.dash_cooldown = {} # {guild_id: float}
         
         # SQLite Database Integration for Ranking System
         self._init_db()
@@ -418,7 +440,7 @@ class Music(commands.Cog):
         except Exception:
             return ""
 
-    async def update_dashboard(self, guild, channel=None):
+    async def update_dashboard(self, guild, channel=None, force_resend=False):
         dash_info = self.dashboards.get(guild.id)
         target_channel = channel if channel else (dash_info['channel'] if dash_info else None)
         if not target_channel: return
@@ -466,14 +488,29 @@ class Music(commands.Cog):
         view = DashboardView(self)
         
         try:
-            if dash_info and dash_info.get('message'):
+            if not force_resend and dash_info and dash_info.get('message'):
                 await dash_info['message'].edit(embed=embed, view=view)
             else:
+                if dash_info and dash_info.get('message'):
+                    try: await dash_info['message'].delete()
+                    except: pass
                 msg = await target_channel.send(embed=embed, view=view)
                 self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
-        except discord.errors.NotFound:
+        except Exception:
             msg = await target_channel.send(embed=embed, view=view)
             self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        if message.author.bot or not message.guild: return
+        gid = message.guild.id
+        if gid in self.dashboards:
+            dash = self.dashboards[gid]
+            if message.channel == dash['channel']:
+                now = asyncio.get_event_loop().time()
+                if now - self.dash_cooldown.get(gid, 0) > 5: # 5 second cooldown
+                    self.dash_cooldown[gid] = now
+                    await self.update_dashboard(message.guild, force_resend=True)
 
     async def get_dj_intro(self, song_title: str, requester: str, requester_id: int = None) -> str:
         api_key = get_user_api_key(requester_id) if requester_id else GLOBAL_OR_API_KEY
@@ -529,15 +566,19 @@ class Music(commands.Cog):
 
                 intro_msg = await self.get_dj_intro(player.title, item['requester_name'], item['requester_id'])
                 self.last_dj_msg[ctx.guild.id] = intro_msg
-                await self.update_dashboard(ctx.guild, ctx.channel)
+                await self.update_dashboard(ctx.guild, ctx.channel, force_resend=True)
             except Exception as e:
                 log.error(f"play_next error (retry {_retry}): {e}")
                 if _retry < 3:
-                    await ctx.send(f"⚠️ 無法播放 `{item['query']}`: {e}，嘗試下一首...", delete_after=5)
+                    try: 
+                        await ctx.send(f"⚠️ 無法播放 `{item['query']}`: {e}，嘗試下一首...", delete_after=5)
+                    except Exception: pass
                     await asyncio.sleep(2)
                     await self.play_next(ctx, _retry=_retry + 1)
                 else:
-                    await ctx.send("❌ 連續 3 首無法播放，已停止。", delete_after=5)
+                    try:
+                        await ctx.send("❌ 連續 3 首無法播放，已停止。", delete_after=5)
+                    except Exception: pass
         else:
             self.current_song[ctx.guild.id] = None
             if ctx.guild.id in self.active_radios:
@@ -548,14 +589,14 @@ class Music(commands.Cog):
                     player = await YTDLSource.from_query(radio_url, stream=True)
                     ctx.voice_client.play(player, after=lambda e: self.bot.loop.create_task(self.play_next(ctx)) if e is None else log.error(f'Radio error: {e}'))
                     self.last_dj_msg[ctx.guild.id] = ""
-                    await self.update_dashboard(ctx.guild, ctx.channel)
+                    await self.update_dashboard(ctx.guild, ctx.channel, force_resend=True)
                 except Exception as e:
                     await ctx.send(f"❌ 無法連線至直播源。", delete_after=5)
                     self.active_radios.pop(ctx.guild.id, None)
                     self.is_playing_radio.discard(ctx.guild.id)
             else:
                 self.last_dj_msg[ctx.guild.id] = ""
-                await self.update_dashboard(ctx.guild, ctx.channel)
+                await self.update_dashboard(ctx.guild, ctx.channel, force_resend=True)
 
     @commands.command(name='radio', help='Toggle 24/7 background radio. Options: lofi, jazz, synth, off')
     async def radio(self, ctx, genre: str = None):

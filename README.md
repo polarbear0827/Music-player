@@ -4,17 +4,18 @@
 
 # 🎶 Discord AI Music DJ (智慧電台系統)
 
-一套專為多人大型伺服器量身訂做、結合 **Groq LLM (Llama 3 70B)** 的超強溫馨智慧音樂電台。
+一套專為多人大型伺服器量身訂做、結合 **OpenRouter (Minimax M2.5)** 的超強溫馨智慧音樂電台。
 不但擁有全方位的串流音樂庫（YouTube、Spotify、Apple Music），更具備了強悍的防呆安全鎖與情境智慧找歌功能。
 
 ---
 
 ## 🌟 核心特色 (Features)
 
-### 🤖 真・AI 電台靈魂 (Powered by Llama 3)
+### 🤖 真・AI 電台靈魂 (Powered by Minimax M2.5)
 - **情境精準找歌 (`F!dj`)**：不用再想歌單了！直接輸入你現在的心情（例如：`F!dj 我今天要通宵寫扣，給首戰鬥歌`），AI 會運用零延遲的推演立刻幫你從海量歌曲中找出最適合的一首並自動加入播放。
 - **無縫串場廣播**：每次切換歌曲時，AI 會根據歌名與點歌者的名稱，即時說一句 30 字以內的溫馨加油短語，就像是真的電台 DJ 在廣播一樣暖心！
 - **日常閒聊功能 (`F!chat`)**：無聊時可以隨時 Call 機器人出來瞎聊，它永遠充滿顏文字與正能量。
+- **高穩定性架構**：內建 `FakeCtx` 模擬機制與 OpenRouter 安全防護，確保 AI 服務不中斷。
 
 ### 📻 派對與不打烊社群系統
 - **🎀 粉紅派對 Live 儀表板 (Live Dashboard)**：徹底告別傳統機器人的洗版地獄！播放器會化身為「全頻道唯一」的動態 UI 面板，並內建 Discord 原生 **[⏯實體按鈕]**。任何人不須打指令就能無延遲切歌、暫停、或一鍵開啟電台！
@@ -37,6 +38,8 @@
 2. **防死檔遞迴當機**：YouTube 發生死檔時永遠冷卻 2 秒鐘再繼續播下首，不傷系統計算力。
 3. **無痛刪歌 (`F!remove`) 防撞鎖**：具備絕對伺服器 5 秒鎖，絕不會發生兩人在刪歌時因清單位移而發生的誤刪災難。
 4. **巨型清單防爆閥**：Spotify 單次最高載入 200 首歌，完美拒絕千萬首垃圾清單洗版。
+5. **高效能 HLS 緩衝**：調優 FFmpeg 參數（`probesize/analyzeduration`），徹底解決 HLS 直播卡頓與 403 報錯。
+6. **選單防崩潰 (`Sticker`)**：自動處理訊息刪除衝突，搜尋貼圖不再當機。
 
 ---
 
@@ -63,9 +66,8 @@ SPOTIPY_CLIENT_ID=your_client_id_here
 SPOTIPY_CLIENT_SECRET=your_client_secret_here
 
 # Groq 智慧推理金鑰 (電台 DJ 對話引擎，非常關鍵！)
-GROQ_API_KEY=your_groq_api_key_here
-```
-> **隱私宣導**：本專案已透過 `.gitignore` 嚴格將你的 `.env` 列入隔離清單，你可以放心備份到 GitHub。
+# OpenRouter 智慧推理金鑰 (電台 DJ 對話引擎，支援最新 Minimax-M2.5-Free！)
+OPENROUTER_API_KEY=sk-or-v1-xxxxxxxxxxxxxxxxxxxxxxxx
 
 ### 第四步：電台開播囉！ (部署方式 2 選 1)
 

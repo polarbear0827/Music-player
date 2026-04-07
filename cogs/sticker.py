@@ -17,7 +17,7 @@ EXCEL_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'spongebob
 
 # OpenRouter config
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODEL = "minimax/minimax-m1"
+OPENROUTER_MODEL = "minimax/minimax-m2.5:free"
 GLOBAL_OR_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
 
 
@@ -207,9 +207,15 @@ class Sticker(commands.Cog):
             )
             embed.set_image(url=s['url'])
             embed.set_footer(text=f"搜尋: {keyword} | 系列: {s['series']}")
-            await msg.edit(content=None, embed=embed, view=None)
+            try:
+                await msg.edit(content=None, embed=embed, view=None)
+            except discord.NotFound:
+                pass
         else:
-            await msg.edit(content="⏰ 選擇超時，已取消。", view=None)
+            try:
+                await msg.edit(content="⏰ 選擇超時，已取消。", view=None)
+            except discord.NotFound:
+                pass
 
     @commands.command(name='sticker_random', aliases=['隨機貼圖', 'ssr'], help='隨機送出一張海綿寶寶貼圖')
     async def sticker_random(self, ctx: commands.Context):

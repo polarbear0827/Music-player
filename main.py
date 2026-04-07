@@ -22,7 +22,8 @@ class MusicBot(commands.Bot):
         super().__init__(
             command_prefix=commands.when_mentioned_or('F!'),
             intents=intents,
-            help_command=commands.DefaultHelpCommand()
+            help_command=commands.DefaultHelpCommand(),
+            case_insensitive=True
         )
 
     async def setup_hook(self):
