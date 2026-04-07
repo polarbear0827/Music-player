@@ -1,0 +1,30 @@
+# Byte-compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local Databases and Data
+data/
+music_rank.db
+sticker_keys.db
+*.db
+*.log
+
+# Credentials and Environments
+.env
+
+# Git files
+.git
+.gitignore
+
+# Tests and caches
+.pytest_cache/
+tests/
+
+# Editor files
+.vscode/
+.idea/
+.DS_Store
+
+# Large assets (excel is copied manually or exists in volumes)
+# spongebob.xlsx  # Keeping this in build if needed, or excluding if used as volume

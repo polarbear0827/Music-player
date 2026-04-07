@@ -5,7 +5,17 @@ services:
     build: .
     container_name: discord_music_bot
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     env_file:
       - .env
     volumes:
-      - ./data:/app/data
+      - ./data:/home/botuser/app/data
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import os; exit(0 if os.path.exists('main.py') else 1)"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
