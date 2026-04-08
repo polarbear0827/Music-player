@@ -694,91 +694,72 @@ class Music(commands.Cog):
             artist_name = artist_name.strip().strip('"').strip("'")
             log.info(f"[Rec] Extracted artist: {artist_name}")
             
-            # Step 2: Search Spotify for this artist's top tracks (100% real data)
-            resolved = []
-            seen_urls = set()        # Deduplicate by YouTube URL
-            seen_titles = set()      # Deduplicate by normalized title
-            
-            def _is_duplicate(result):
-                """Check if a result is a duplicate by URL or normalized title."""
-                url = result.get('url', '')
-                # Normalize title: lowercase, strip whitespace/punctuation-like differences
-                title_norm = re.sub(r'[^a-z0-9]', '', result.get('title', '').lower())
-                if url in seen_urls or title_norm in seen_titles:
-                    log.info(f"[Rec] Skipped duplicate: '{result['title']}'")
-                    return True
-                seen_urls.add(url)
-                seen_titles.add(title_norm)
-                return False
-            
             # Build excluded set: already played + the current song itself
             last_played_title = (last_played.get('title') or last_played['query']).lower()
             exclude_titles = hist_titles | {last_played_title, last_played['query'].lower()}
             
-            artist_real_name = artist_name  # fallback display name
-            artist_lower = artist_name.lower() if artist_name else ''
+            resolved = []
+            seen_track_norms = set()
             
+            def _is_dupe_name(name):
+                norm = re.sub(r'[^a-z0-9]', '', name.lower())
+                if norm in seen_track_norms:
+                    return True
+                seen_track_norms.add(norm)
+                return False
+            
+            artist_real_name = artist_name
+            
+            # === PRIMARY: Spotify Artist Top Tracks (instant, 100% real) ===
             if sp and artist_name:
                 try:
                     search_result = await asyncio.to_thread(
                         lambda: sp.search(q=f"artist:{artist_name}", type='artist', limit=1)
                     )
-                    artists = search_result.get('artists', {}).get('items', [])
-                    if artists:
-                        artist_id = artists[0]['id']
-                        artist_real_name = artists[0]['name']
-                        artist_lower = artist_real_name.lower()
+                    artists_list = search_result.get('artists', {}).get('items', [])
+                    if artists_list:
+                        artist_id = artists_list[0]['id']
+                        artist_real_name = artists_list[0]['name']
                         top_tracks_result = await asyncio.to_thread(
                             lambda: sp.artist_top_tracks(artist_id, country='TW')
                         )
                         top_tracks = top_tracks_result.get('tracks', [])
                         
-                        # Filter out already-played songs and the current song
-                        candidates = []
-                        seen_track_names = set()
                         for track in top_tracks:
-                            track_name = track['name']
-                            t_artist   = track['artists'][0]['name']
-                            combined   = f"{t_artist} {track_name}".lower()
-                            track_norm = re.sub(r'[^a-z0-9]', '', track_name.lower())
-                            # Skip Spotify-level duplicates (same song name different casing)
-                            if track_norm in seen_track_names:
-                                continue
-                            # Exclude if any part of the title overlaps with played/current
-                            if (combined not in exclude_titles and
-                                track_name.lower() not in exclude_titles and
-                                not any(track_name.lower() in e for e in exclude_titles)):
-                                candidates.append(f"{t_artist} {track_name} Official Audio")
-                                seen_track_names.add(track_norm)
-                        
-                        log.info(f"[Rec] Spotify returned {len(top_tracks)} tracks, {len(candidates)} after filtering")
-                        
-                        # Step 3: Verify via yt-dlp + artist mismatch guard + dedup
-                        for kw in candidates[:10]:
                             if len(resolved) >= 3:
                                 break
-                            result = await self._resolve_yt_search(kw)
-                            if result:
-                                title_lower   = result.get('title', '').lower()
-                                channel_lower = result.get('channel', '').lower()
-                                if artist_lower not in title_lower and artist_lower not in channel_lower:
-                                    log.info(f"[Rec] Rejected '{result['title']}' – artist mismatch")
-                                    continue
-                                if _is_duplicate(result):
-                                    continue
-                                result['display'] = f"{artist_real_name} - {result['title']}"
-                                resolved.append(result)
+                            track_name = track['name']
+                            t_artist   = track['artists'][0]['name']
+                            
+                            # Skip duplicates
+                            if _is_dupe_name(track_name):
+                                continue
+                            
+                            # Skip already played
+                            if (track_name.lower() in exclude_titles or
+                                any(track_name.lower() in e for e in exclude_titles)):
+                                continue
+                            
+                            # Spotify data is 100% real — no yt-dlp verification needed!
+                            # Just store the search query for when user clicks the button
+                            resolved.append({
+                                'display': f"{t_artist} - {track_name}",
+                                'title': f"{t_artist} - {track_name}",
+                                'url': f"{t_artist} {track_name} Official Audio",  # search query for play
+                            })
+                        
+                        log.info(f"[Rec] Spotify: {len(top_tracks)} total, {len(resolved)} selected")
                 except Exception as e:
-                    log.error(f"[Rec] Spotify artist lookup failed: {e}")
+                    log.error(f"[Rec] Spotify lookup failed: {e}")
             
-            # Fallback / Supplement: AI keyword search if we still have fewer than 3
+            # === SUPPLEMENT: AI fallback if Spotify gave < 3 results ===
             if len(resolved) < 3:
-                log.info(f"[Rec] Supplementing with AI keywords (have {len(resolved)}, need 3)")
-                played_str = ", ".join(list(exclude_titles)[:30]) if exclude_titles else "無"
+                log.info(f"[Rec] Supplementing (have {len(resolved)}, need 3)")
+                played_str = ", ".join(list(exclude_titles)[:20]) if exclude_titles else "無"
                 needed = 3 - len(resolved)
                 fallback_prompt = (
-                    f"你是音樂 DJ。根據歌曲『{last_title}』，列出 {needed + 4} 個 YouTube 搜尋字串，"
-                    f"找該歌手真實存在的熱門歌曲（格式：「歌手英文名 歌名 Official Audio」）。"
+                    f"你是音樂 DJ。根據歌曲『{last_title}』，列出 {needed + 3} 個 YouTube 搜尋字串，"
+                    f"找 {artist_real_name} 真實存在的熱門歌曲（格式：「歌手英文名 歌名 Official Audio」）。"
                     f"已播清單（不能重複）：[{played_str}]。"
                     "只回傳純 JSON 陣列，不加任何說明。"
                 )
@@ -789,25 +770,20 @@ class Music(commands.Cog):
                     )
                     raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```")
                     keywords = json.loads(raw)
-                    for kw in keywords[:needed + 4]:
+                    for kw in keywords[:needed + 3]:
                         if len(resolved) >= 3:
                             break
-                        result = await self._resolve_yt_search(str(kw))
-                        if result and artist_name:
-                            t_lower = result.get('title', '').lower()
-                            c_lower = result.get('channel', '').lower()
-                            if artist_lower not in t_lower and artist_lower not in c_lower:
-                                log.info(f"[Rec] Fallback rejected '{result['title']}' – artist mismatch")
-                                continue
-                            if _is_duplicate(result):
-                                continue
-                            result['display'] = f"{artist_real_name} - {result['title']}"
-                            resolved.append(result)
-                        elif result:
-                            if not _is_duplicate(result):
-                                resolved.append(result)
+                        kw_str = str(kw).strip()
+                        # Extract song name portion for dedup
+                        if not _is_dupe_name(kw_str):
+                            resolved.append({
+                                'display': kw_str.replace(' Official Audio', ''),
+                                'title': kw_str.replace(' Official Audio', ''),
+                                'url': kw_str,
+                            })
                 except Exception as e:
                     log.error(f"[Rec] AI fallback failed: {e}")
+
 
             
             self.recommendations[guild.id]['items'] = resolved
