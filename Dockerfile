@@ -46,7 +46,7 @@ USER botuser
 WORKDIR /home/botuser/app
 
 # Copy wheels from builder and install them
-COPY --from=builder /app/wheels /tmp/wheels
+COPY --chown=botuser:botuser --from=builder /app/wheels /tmp/wheels
 COPY requirements.txt .
 RUN pip install --no-cache-dir --user /tmp/wheels/* && \
     rm -rf /tmp/wheels
