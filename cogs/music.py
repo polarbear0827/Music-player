@@ -706,20 +706,28 @@ class Music(commands.Cog):
                 seen_track_norms.add(norm)
                 return False
             
+            def _is_excluded(track_name):
+                """Check if a track name overlaps with any excluded title."""
+                tn = track_name.lower().strip()
+                if tn in exclude_titles:
+                    return True
+                for e in exclude_titles:
+                    if tn in e or e in tn:
+                        return True
+                return False
+            
             # ============================================================
-            # STEP 1: Find correct Spotify artist ID via TRACK SEARCH
-            # Instead of AI extraction (which confuses milet/Miley),
-            # we search Spotify for the SPECIFIC TRACK being played.
-            # This gives us the exact, verified artist ID.
+            # STEP 1: Find the artist via Spotify TRACK SEARCH
+            # Search for the specific song being played to find the artist.
+            # sp.search() works fine — only artist_top_tracks returns 403.
             # ============================================================
             artist_id = None
             artist_real_name = None
             
             if sp:
                 try:
-                    # Clean up the title for Spotify search
                     search_title = re.sub(r'\(Official.*?\)|\[.*?\]|Official Video|Official Audio|MV|MUSIC VIDEO|Music Video|Lyrics?|feat\..*', '', last_title, flags=re.IGNORECASE).strip()
-                    search_title = re.sub(r'[「」『』【】（）\(\)]', ' ', search_title).strip()
+                    search_title = re.sub(r'[「」『』【】（）\(\)\-]', ' ', search_title).strip()
                     search_title = re.sub(r'\s+', ' ', search_title).strip()[:80]
                     
                     log.info(f"[Rec] Searching Spotify track: '{search_title}'")
@@ -730,73 +738,79 @@ class Music(commands.Cog):
                     tracks_found = track_search.get('tracks', {}).get('items', [])
                     
                     if tracks_found:
-                        # Pick the first track — Spotify's relevance ranking is reliable
                         best_track = tracks_found[0]
                         artist_id = best_track['artists'][0]['id']
                         artist_real_name = best_track['artists'][0]['name']
-                        log.info(f"[Rec] Found artist via track search: '{artist_real_name}' (id: {artist_id})")
+                        log.info(f"[Rec] Found artist: '{artist_real_name}' (id: {artist_id})")
+                        
+                        # Also exclude the current song's Spotify name
+                        _is_dupe_name(best_track['name'])  # Mark current song as seen
                 except Exception as e:
                     log.error(f"[Rec] Spotify track search failed: {e}")
             
             # ============================================================
-            # STEP 2: Get artist's REAL top tracks from Spotify
-            # Try multiple country codes to avoid 403 errors
+            # STEP 2: Find more tracks by this artist via TRACK SEARCH
+            # Since artist_top_tracks returns 403, we use:
+            #   sp.search(q="artist:milet", type='track', limit=20)
+            # This searches Spotify's track catalog filtered by artist.
+            # The results are sorted by popularity (most popular first).
             # ============================================================
-            if sp and artist_id:
-                top_tracks = None
-                for country in ['JP', 'US', 'TW']:
-                    try:
-                        top_tracks_result = await asyncio.to_thread(
-                            lambda c=country: sp.artist_top_tracks(artist_id, country=c)
-                        )
-                        top_tracks = top_tracks_result.get('tracks', [])
-                        if top_tracks:
-                            log.info(f"[Rec] Got {len(top_tracks)} top tracks (country={country})")
-                            break
-                    except Exception as e:
-                        log.warning(f"[Rec] artist_top_tracks failed for country={country}: {e}")
-                        continue
-                
-                if top_tracks:
-                    for track in top_tracks:
+            if sp and artist_real_name:
+                try:
+                    artist_tracks_search = await asyncio.to_thread(
+                        lambda: sp.search(q=f"artist:{artist_real_name}", type='track', limit=20)
+                    )
+                    all_tracks = artist_tracks_search.get('tracks', {}).get('items', [])
+                    
+                    # Sort by popularity (highest first)
+                    all_tracks.sort(key=lambda t: t.get('popularity', 0), reverse=True)
+                    
+                    log.info(f"[Rec] Spotify track search returned {len(all_tracks)} tracks for '{artist_real_name}'")
+                    
+                    for track in all_tracks:
                         if len(resolved) >= 3:
                             break
-                        track_name = track['name']
-                        t_artist   = track['artists'][0]['name']
                         
-                        # Verify this track actually belongs to the same artist
-                        if track['artists'][0]['id'] != artist_id:
+                        track_name = track['name']
+                        t_artist = track['artists'][0]['name']
+                        
+                        # Must be by the EXACT same artist (check by ID)
+                        if not any(a['id'] == artist_id for a in track['artists']):
+                            log.info(f"[Rec] Skipped '{track_name}' by '{t_artist}' (wrong artist)")
                             continue
                         
+                        # Skip if duplicate name
                         if _is_dupe_name(track_name):
                             continue
                         
-                        if (track_name.lower() in exclude_titles or
-                            any(track_name.lower() in e for e in exclude_titles)):
+                        # Skip if currently playing or in history
+                        if _is_excluded(track_name):
+                            log.info(f"[Rec] Excluded '{track_name}' (already played/current)")
                             continue
                         
-                        play_query = f"{t_artist} - {track_name}"
+                        # Use Spotify URL for PRECISE playback (no YouTube guessing)
+                        spotify_url = track.get('external_urls', {}).get('spotify', '')
                         resolved.append({
-                            'display': f"{t_artist} - {track_name}",
-                            'title': f"{t_artist} - {track_name}",
-                            'url': play_query,
+                            'display': f"{artist_real_name} - {track_name}",
+                            'title': f"{artist_real_name} - {track_name}",
+                            'url': spotify_url or f"{artist_real_name} - {track_name}",
                         })
+                        log.info(f"[Rec] Selected: '{artist_real_name} - {track_name}' (pop: {track.get('popularity', '?')})")
                     
-                    log.info(f"[Rec] Spotify: {len(resolved)} recommendations selected")
+                except Exception as e:
+                    log.error(f"[Rec] Spotify artist track search failed: {e}")
             
             # ============================================================
-            # STEP 3: AI fallback with yt-dlp verification
-            # Only used when Spotify completely fails. Each result is
-            # verified by yt-dlp to confirm the artist matches.
+            # STEP 3: AI fallback ONLY if Spotify completely unavailable
             # ============================================================
             if len(resolved) < 3 and artist_real_name:
                 log.info(f"[Rec] AI fallback for '{artist_real_name}' (have {len(resolved)})")
                 played_str = ", ".join(list(exclude_titles)[:20]) if exclude_titles else "無"
                 needed = 3 - len(resolved)
                 fallback_prompt = (
-                    f"你是音樂 DJ。根據歌曲『{last_title}』，列出 {needed + 4} 首 {artist_real_name} 最知名的歌曲名稱。"
-                    f"已播清單（不能重複）：[{played_str}]。"
-                    "只回傳純 JSON 陣列，格式: [\"歌名1\", \"歌名2\", \"歌名3\"]，不加任何說明。"
+                    f"列出 {needed + 4} 首 {artist_real_name} 最知名的歌曲名稱（只要歌名）。"
+                    f"以下已播放過不能重複：[{played_str}]。"
+                    "只回傳純 JSON 陣列，格式: [\"歌名1\", \"歌名2\"]，不加任何說明。"
                 )
                 try:
                     raw = await call_openrouter(
@@ -812,35 +826,48 @@ class Music(commands.Cog):
                         song_str = str(song).strip()
                         if _is_dupe_name(song_str):
                             continue
+                        if _is_excluded(song_str):
+                            continue
                         
-                        # Verify via yt-dlp that this is a real song by the correct artist
+                        # Verify via yt-dlp
                         search_kw = f"{artist_real_name} {song_str} Official Audio"
                         result = await self._resolve_yt_search(search_kw)
                         if result:
-                            title_lower = result.get('title', '').lower()
-                            channel_lower = result.get('channel', '').lower()
-                            artist_lower = artist_real_name.lower()
-                            if artist_lower in title_lower or artist_lower in channel_lower:
-                                display = f"{artist_real_name} - {song_str}"
-                                resolved.append({
-                                    'display': display,
-                                    'title': display,
-                                    'url': f"{artist_real_name} - {song_str}",
-                                })
-                                log.info(f"[Rec] AI fallback verified: '{song_str}'")
-                            else:
-                                log.info(f"[Rec] AI fallback rejected: '{song_str}' → '{result['title']}'")
+                            yt_title = result.get('title', '').lower()
+                            yt_channel = result.get('channel', '').lower()
+                            a_lower = artist_real_name.lower()
+                            
+                            # Verify: artist must appear in title or channel
+                            if a_lower not in yt_title and a_lower not in yt_channel:
+                                log.info(f"[Rec] AI rejected: '{song_str}' → '{result['title']}' (artist mismatch)")
+                                continue
+                            
+                            # Verify: the song name should appear in the YouTube title
+                            song_norm = re.sub(r'[^a-z0-9]', '', song_str.lower())
+                            title_norm = re.sub(r'[^a-z0-9]', '', yt_title)
+                            if song_norm not in title_norm:
+                                log.info(f"[Rec] AI rejected: '{song_str}' → '{result['title']}' (song title mismatch)")
+                                continue
+                            
+                            display = f"{artist_real_name} - {song_str}"
+                            resolved.append({
+                                'display': display,
+                                'title': display,
+                                'url': result.get('url', f"{artist_real_name} - {song_str}"),
+                            })
+                            log.info(f"[Rec] AI verified: '{song_str}' → '{result['title']}'")
                 except Exception as e:
                     log.error(f"[Rec] AI fallback failed: {e}")
             
             self.recommendations[guild.id]['items'] = resolved
-            log.info(f"[Rec] Final: {len(resolved)} recommendations for guild {guild.id}")
+            log.info(f"[Rec] Final: {len(resolved)} recommendations")
             
         except Exception as e:
             log.error(f"[Rec] fetch_and_show_recommendations failed: {e}")
         
         self.recommendations[guild.id]['loading'] = False
         await self.update_dashboard(guild, channel)
+
 
 
 
