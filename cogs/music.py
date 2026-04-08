@@ -230,8 +230,8 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
     @classmethod
     async def from_query(cls, query, stream=True):
-        # Prepend ytsearch: if it's not a direct URL
-        if not query.startswith('http'):
+        # Prepend ytsearch: if it's not a direct URL or already a search query
+        if not query.startswith('http') and not query.startswith('ytsearch') and not query.startswith('ytmsearch'):
             query = f"ytsearch:{query} (Official Audio)"
 
         try:
@@ -279,22 +279,9 @@ class DashboardView(discord.ui.View):
                     def make_callback(song_query, song_display):
                         async def callback(interaction: discord.Interaction):
                             queue = self.cog.get_queue(interaction.guild.id)
-                            
-                            # If it's a Spotify URL, convert it first
-                            actual_query = song_query
-                            if is_spotify_url(str(song_query)):
-                                try:
-                                    parsed = await interaction.client.loop.run_in_executor(
-                                        None, get_track_info_from_spotify, song_query
-                                    )
-                                    if parsed:
-                                        actual_query = parsed[0]
-                                except Exception:
-                                    actual_query = song_display + " (Official Audio)"
-                            
                             queue.append({
                                 'id': str(uuid.uuid4()), 
-                                'query': actual_query, 
+                                'query': song_query, 
                                 'requester_id': interaction.user.id, 
                                 'requester_name': interaction.user.display_name
                             })
@@ -750,65 +737,60 @@ class Music(commands.Cog):
             
             # ============================================================
             # STEP 2: Find more tracks by this artist via TRACK SEARCH
-            # Since artist_top_tracks returns 403, we use:
-            #   sp.search(q="artist:milet", type='track', limit=20)
-            # This searches Spotify's track catalog filtered by artist.
-            # The results are sorted by popularity (most popular first).
+            # Since artist_top_tracks returns 403, we search for tracks.
+            # Query format: just the artist name (NOT "artist:name" which 400s)
             # ============================================================
-            if sp and artist_real_name:
+            if sp and artist_real_name and artist_id:
                 try:
+                    # Search for tracks by this artist name
                     artist_tracks_search = await asyncio.to_thread(
-                        lambda: sp.search(q=f"artist:{artist_real_name}", type='track', limit=20)
+                        lambda: sp.search(q=artist_real_name, type='track', limit=30)
                     )
                     all_tracks = artist_tracks_search.get('tracks', {}).get('items', [])
                     
-                    # Sort by popularity (highest first)
-                    all_tracks.sort(key=lambda t: t.get('popularity', 0), reverse=True)
+                    # Filter to only tracks by this exact artist (by ID) and sort by popularity
+                    artist_tracks = [t for t in all_tracks if any(a['id'] == artist_id for a in t['artists'])]
+                    artist_tracks.sort(key=lambda t: t.get('popularity', 0), reverse=True)
                     
-                    log.info(f"[Rec] Spotify track search returned {len(all_tracks)} tracks for '{artist_real_name}'")
+                    log.info(f"[Rec] Spotify found {len(all_tracks)} tracks, {len(artist_tracks)} by '{artist_real_name}'")
                     
-                    for track in all_tracks:
+                    for track in artist_tracks:
                         if len(resolved) >= 3:
                             break
                         
                         track_name = track['name']
-                        t_artist = track['artists'][0]['name']
                         
-                        # Must be by the EXACT same artist (check by ID)
-                        if not any(a['id'] == artist_id for a in track['artists']):
-                            log.info(f"[Rec] Skipped '{track_name}' by '{t_artist}' (wrong artist)")
-                            continue
-                        
-                        # Skip if duplicate name
                         if _is_dupe_name(track_name):
                             continue
                         
-                        # Skip if currently playing or in history
                         if _is_excluded(track_name):
-                            log.info(f"[Rec] Excluded '{track_name}' (already played/current)")
+                            log.info(f"[Rec] Excluded '{track_name}'")
                             continue
                         
-                        # Use Spotify URL for PRECISE playback (no YouTube guessing)
-                        spotify_url = track.get('external_urls', {}).get('spotify', '')
+                        # Store as plain text query — from_query handles the YouTube search
+                        play_query = f"{artist_real_name} - {track_name}"
                         resolved.append({
                             'display': f"{artist_real_name} - {track_name}",
                             'title': f"{artist_real_name} - {track_name}",
-                            'url': spotify_url or f"{artist_real_name} - {track_name}",
+                            'url': play_query,
                         })
-                        log.info(f"[Rec] Selected: '{artist_real_name} - {track_name}' (pop: {track.get('popularity', '?')})")
+                        log.info(f"[Rec] Selected: '{play_query}' (pop: {track.get('popularity', '?')})")
                     
                 except Exception as e:
                     log.error(f"[Rec] Spotify artist track search failed: {e}")
             
             # ============================================================
-            # STEP 3: AI fallback ONLY if Spotify completely unavailable
+            # STEP 3: AI fallback with SPOTIFY verification
+            # Each AI-suggested song is verified by searching Spotify to
+            # confirm it's a real track by this artist. No more yt-dlp
+            # false positives (e.g. "Kokoro Hitofuri" passing verification).
             # ============================================================
             if len(resolved) < 3 and artist_real_name:
                 log.info(f"[Rec] AI fallback for '{artist_real_name}' (have {len(resolved)})")
-                played_str = ", ".join(list(exclude_titles)[:20]) if exclude_titles else "無"
+                played_str = ", ".join(list(exclude_titles)[:15]) if exclude_titles else "無"
                 needed = 3 - len(resolved)
                 fallback_prompt = (
-                    f"列出 {needed + 4} 首 {artist_real_name} 最知名的歌曲名稱（只要歌名）。"
+                    f"列出 {needed + 5} 首 {artist_real_name} 最知名的歌曲名稱（只要歌名）。"
                     f"以下已播放過不能重複：[{played_str}]。"
                     "只回傳純 JSON 陣列，格式: [\"歌名1\", \"歌名2\"]，不加任何說明。"
                 )
@@ -820,7 +802,7 @@ class Music(commands.Cog):
                     raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```")
                     song_names = json.loads(raw)
                     
-                    for song in song_names[:needed + 4]:
+                    for song in song_names[:needed + 5]:
                         if len(resolved) >= 3:
                             break
                         song_str = str(song).strip()
@@ -829,35 +811,36 @@ class Music(commands.Cog):
                         if _is_excluded(song_str):
                             continue
                         
-                        # Verify via yt-dlp
-                        search_kw = f"{artist_real_name} {song_str} Official Audio"
-                        result = await self._resolve_yt_search(search_kw)
-                        if result:
-                            yt_title = result.get('title', '').lower()
-                            yt_channel = result.get('channel', '').lower()
-                            a_lower = artist_real_name.lower()
-                            
-                            # Verify: artist must appear in title or channel
-                            if a_lower not in yt_title and a_lower not in yt_channel:
-                                log.info(f"[Rec] AI rejected: '{song_str}' → '{result['title']}' (artist mismatch)")
-                                continue
-                            
-                            # Verify: the song name should appear in the YouTube title
-                            song_norm = re.sub(r'[^a-z0-9]', '', song_str.lower())
-                            title_norm = re.sub(r'[^a-z0-9]', '', yt_title)
-                            if song_norm not in title_norm:
-                                log.info(f"[Rec] AI rejected: '{song_str}' → '{result['title']}' (song title mismatch)")
-                                continue
-                            
-                            display = f"{artist_real_name} - {song_str}"
-                            resolved.append({
-                                'display': display,
-                                'title': display,
-                                'url': result.get('url', f"{artist_real_name} - {song_str}"),
-                            })
-                            log.info(f"[Rec] AI verified: '{song_str}' → '{result['title']}'")
+                        # VERIFY on Spotify: search for "artist_name song_name"
+                        # and check if the result's artist ID matches
+                        if sp:
+                            try:
+                                verify_result = await asyncio.to_thread(
+                                    lambda s=song_str: sp.search(q=f"{artist_real_name} {s}", type='track', limit=3)
+                                )
+                                verify_tracks = verify_result.get('tracks', {}).get('items', [])
+                                verified = False
+                                for vt in verify_tracks:
+                                    if any(a['id'] == artist_id for a in vt['artists']):
+                                        # The song actually belongs to this artist!
+                                        real_name = vt['name']
+                                        display = f"{artist_real_name} - {real_name}"
+                                        resolved.append({
+                                            'display': display,
+                                            'title': display,
+                                            'url': f"{artist_real_name} - {real_name}",
+                                        })
+                                        log.info(f"[Rec] AI verified via Spotify: '{song_str}' → '{real_name}'")
+                                        verified = True
+                                        break
+                                if not verified:
+                                    log.info(f"[Rec] AI rejected: '{song_str}' (not found on Spotify for {artist_real_name})")
+                            except Exception as e:
+                                log.warning(f"[Rec] Spotify verify failed for '{song_str}': {e}")
+                        
                 except Exception as e:
                     log.error(f"[Rec] AI fallback failed: {e}")
+
             
             self.recommendations[guild.id]['items'] = resolved
             log.info(f"[Rec] Final: {len(resolved)} recommendations")
