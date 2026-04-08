@@ -266,7 +266,8 @@ class DashboardView(discord.ui.View):
                 for i, r in enumerate(rec_data['items']):
                     # Each item is now a dict: {'title': real_yt_title, 'url': real_yt_url}
                     if isinstance(r, dict):
-                        display_label = r.get('title', str(r))[:70]
+                        display_label = r.get('display') or r.get('title', str(r))
+                        display_label = display_label[:75]
                         play_query   = r.get('url') or r.get('title', str(r))
                     else:
                         display_label = str(r)[:70]
@@ -639,7 +640,7 @@ class Music(commands.Cog):
             return f"🎵 **Now playing:** {song_title}\n*(Requested by {requester})*"
 
     async def _resolve_yt_search(self, search_query: str):
-        """Search YouTube with yt-dlp and return the first real result as {'title', 'url'}."""
+        """Search YouTube with yt-dlp and return the first real result as {'title', 'url', 'channel'}."""
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -653,9 +654,17 @@ class Music(commands.Cog):
             )
             if data and 'entries' in data and data['entries']:
                 entry = data['entries'][0]
-                return {'title': entry.get('title', search_query), 'url': entry.get('webpage_url', search_query)}
+                return {
+                    'title': entry.get('title', search_query),
+                    'url': entry.get('webpage_url', search_query),
+                    'channel': entry.get('uploader', '') or entry.get('channel', '')
+                }
             elif data and data.get('webpage_url'):
-                return {'title': data.get('title', search_query), 'url': data['webpage_url']}
+                return {
+                    'title': data.get('title', search_query),
+                    'url': data['webpage_url'],
+                    'channel': data.get('uploader', '') or data.get('channel', '')
+                }
         except Exception as e:
             log.error(f"yt-search failed for '{search_query}': {e}")
         return None
@@ -712,11 +721,21 @@ class Music(commands.Cog):
                         log.info(f"[Rec] Spotify returned {len(top_tracks)} tracks, {len(candidates)} after filtering")
                         
                         # Step 3: Verify each candidate on YouTube via yt-dlp
-                        for kw in candidates[:6]:
+                        # Also validate that the result actually belongs to the correct artist
+                        artist_lower = artists[0]['name'].lower()
+                        for kw in candidates[:8]:
                             if len(resolved) >= 3:
                                 break
                             result = await self._resolve_yt_search(kw)
                             if result:
+                                # Validate: artist name must appear in title OR channel name
+                                title_lower   = result.get('title', '').lower()
+                                channel_lower = result.get('channel', '').lower()
+                                if artist_lower not in title_lower and artist_lower not in channel_lower:
+                                    log.info(f"[Rec] Rejected '{result['title']}' (channel: {result.get('channel')}) – artist mismatch")
+                                    continue
+                                # Build a clean display label: "Artist - YouTube Title"
+                                result['display'] = f"{artists[0]['name']} - {result['title']}"
                                 resolved.append(result)
                 except Exception as e:
                     log.error(f"[Rec] Spotify artist lookup failed: {e}")
