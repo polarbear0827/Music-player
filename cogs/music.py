@@ -53,7 +53,7 @@ async def call_openrouter(messages: list, api_key: str, max_tokens: int, tempera
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "minimax/minimax-m2.5:free",
+        "model": "google/gemma-2-9b-it:free",
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens
