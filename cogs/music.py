@@ -696,6 +696,11 @@ class Music(commands.Cog):
             
             # Step 2: Search Spotify for this artist's top tracks (100% real data)
             resolved = []
+            
+            # Build excluded set: already played + the current song itself
+            last_played_title = (last_played.get('title') or last_played['query']).lower()
+            exclude_titles = hist_titles | {last_played_title, last_played['query'].lower()}
+            
             if sp and artist_name:
                 try:
                     search_result = await asyncio.to_thread(
@@ -704,38 +709,39 @@ class Music(commands.Cog):
                     artists = search_result.get('artists', {}).get('items', [])
                     if artists:
                         artist_id = artists[0]['id']
+                        artist_real_name = artists[0]['name']
+                        artist_lower = artist_real_name.lower()
                         top_tracks_result = await asyncio.to_thread(
                             lambda: sp.artist_top_tracks(artist_id, country='TW')
                         )
                         top_tracks = top_tracks_result.get('tracks', [])
                         
-                        # Filter out already-played songs
+                        # Filter out already-played songs and the current song
                         candidates = []
                         for track in top_tracks:
                             track_name = track['name']
-                            artist_real = track['artists'][0]['name']
-                            search_str = f"{artist_real} {track_name}"
-                            if search_str.lower() not in hist_titles and track_name.lower() not in hist_titles:
-                                candidates.append(f"{artist_real} {track_name} Official Audio")
+                            t_artist   = track['artists'][0]['name']
+                            combined   = f"{t_artist} {track_name}".lower()
+                            # Exclude if any part of the title overlaps with played/current
+                            if (combined not in exclude_titles and
+                                track_name.lower() not in exclude_titles and
+                                not any(track_name.lower() in e for e in exclude_titles)):
+                                candidates.append(f"{t_artist} {track_name} Official Audio")
                         
                         log.info(f"[Rec] Spotify returned {len(top_tracks)} tracks, {len(candidates)} after filtering")
                         
-                        # Step 3: Verify each candidate on YouTube via yt-dlp
-                        # Also validate that the result actually belongs to the correct artist
-                        artist_lower = artists[0]['name'].lower()
+                        # Step 3: Verify via yt-dlp + artist mismatch guard
                         for kw in candidates[:8]:
                             if len(resolved) >= 3:
                                 break
                             result = await self._resolve_yt_search(kw)
                             if result:
-                                # Validate: artist name must appear in title OR channel name
                                 title_lower   = result.get('title', '').lower()
                                 channel_lower = result.get('channel', '').lower()
                                 if artist_lower not in title_lower and artist_lower not in channel_lower:
-                                    log.info(f"[Rec] Rejected '{result['title']}' (channel: {result.get('channel')}) – artist mismatch")
+                                    log.info(f"[Rec] Rejected '{result['title']}' – artist mismatch")
                                     continue
-                                # Build a clean display label: "Artist - YouTube Title"
-                                result['display'] = f"{artists[0]['name']} - {result['title']}"
+                                result['display'] = f"{artist_real_name} - {result['title']}"
                                 resolved.append(result)
                 except Exception as e:
                     log.error(f"[Rec] Spotify artist lookup failed: {e}")
@@ -743,7 +749,7 @@ class Music(commands.Cog):
             # Fallback: AI keyword search if Spotify didn't work
             if not resolved:
                 log.info("[Rec] Falling back to AI keyword search")
-                played_str = ", ".join(list(hist_titles)[:30]) if hist_titles else "無"
+                played_str = ", ".join(list(exclude_titles)[:30]) if exclude_titles else "無"
                 fallback_prompt = (
                     f"你是音樂 DJ。根據歌曲『{last_title}』，列出 5 個 YouTube 搜尋字串，"
                     f"找該歌手真實存在的熱門歌曲（格式：「歌手英文名 歌名 Official Audio」）。"
@@ -756,12 +762,23 @@ class Music(commands.Cog):
                 )
                 raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```")
                 keywords = json.loads(raw)
+                # In fallback, apply artist validation too if we know the artist
                 for kw in keywords[:5]:
                     if len(resolved) >= 3:
                         break
                     result = await self._resolve_yt_search(str(kw))
-                    if result:
+                    if result and artist_name:
+                        a_lower = artist_name.lower()
+                        t_lower = result.get('title', '').lower()
+                        c_lower = result.get('channel', '').lower()
+                        if a_lower not in t_lower and a_lower not in c_lower:
+                            log.info(f"[Rec] Fallback rejected '{result['title']}' – artist mismatch")
+                            continue
+                        result['display'] = f"{artist_name} - {result['title']}"
                         resolved.append(result)
+                    elif result:
+                        resolved.append(result)
+
             
             self.recommendations[guild.id]['items'] = resolved
             
