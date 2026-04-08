@@ -321,10 +321,10 @@ class DashboardView(discord.ui.View):
             self.cog.current_song[interaction.guild.id] = None
             self.cog.active_radios.pop(interaction.guild.id, None)
             self.cog.is_playing_radio.discard(interaction.guild.id)
+            self.cog.recommendations.pop(interaction.guild.id, None)
             vc.stop()
             await vc.disconnect()
         await interaction.response.defer()
-        await self.cog.update_dashboard(interaction.guild, interaction.channel)
 
     @discord.ui.button(label="🔁 循環模式", style=discord.ButtonStyle.secondary, custom_id="dash_loop")
     async def toggle_loop(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -572,22 +572,27 @@ class Music(commands.Cog):
         embed.set_footer(text=f"狀態: {status} | 🔁 {LOOP_LABELS[loop_mode]} | 🔊 {volume}% | 這個面板會自動更新")
         view = DashboardView(self, guild.id)
         
-        try:
-            if not force_resend and dash_info and dash_info.get('message'):
-                await dash_info['message'].edit(embed=embed, view=view)
-            else:
-                if dash_info and dash_info.get('message'):
-                    try: await dash_info['message'].delete()
-                    except: pass
+            try:
+                if not force_resend and dash_info and dash_info.get('message'):
+                    try:
+                        await dash_info['message'].edit(embed=embed, view=view)
+                    except discord.errors.NotFound:
+                        msg = await target_channel.send(embed=embed, view=view)
+                        self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
+                else:
+                    if dash_info and dash_info.get('message'):
+                        try: await dash_info['message'].delete()
+                        except: pass
+                    msg = await target_channel.send(embed=embed, view=view)
+                    self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
+            except Exception as e:
+                log.error(f"update_dashboard editing failed, fallback to resend: {e}")
+                try:
+                    if dash_info and dash_info.get('message'):
+                        await dash_info['message'].delete()
+                except: pass
                 msg = await target_channel.send(embed=embed, view=view)
                 self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
-        except Exception:
-            try:
-                if dash_info and dash_info.get('message'):
-                    await dash_info['message'].delete()
-            except: pass
-            msg = await target_channel.send(embed=embed, view=view)
-            self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -701,6 +706,13 @@ class Music(commands.Cog):
                         await ctx.send("❌ 連續 3 首無法播放，已停止。", delete_after=5)
                     except Exception: pass
         else:
+            # We must gracefully append the LAST song to history before clearing it naturally!
+            curr = self.current_song.get(ctx.guild.id)
+            if curr is not None:
+                self.get_history(ctx.guild.id).append(curr)
+                if len(self.histories[ctx.guild.id]) > 200:
+                    self.histories[ctx.guild.id].pop(0)
+
             self.current_song[ctx.guild.id] = None
             if ctx.guild.id in self.active_radios:
                 radio_genre = self.active_radios[ctx.guild.id]
