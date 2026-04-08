@@ -279,9 +279,22 @@ class DashboardView(discord.ui.View):
                     def make_callback(song_query, song_display):
                         async def callback(interaction: discord.Interaction):
                             queue = self.cog.get_queue(interaction.guild.id)
+                            
+                            # If it's a Spotify URL, convert it first
+                            actual_query = song_query
+                            if is_spotify_url(str(song_query)):
+                                try:
+                                    parsed = await interaction.client.loop.run_in_executor(
+                                        None, get_track_info_from_spotify, song_query
+                                    )
+                                    if parsed:
+                                        actual_query = parsed[0]
+                                except Exception:
+                                    actual_query = song_display + " (Official Audio)"
+                            
                             queue.append({
                                 'id': str(uuid.uuid4()), 
-                                'query': song_query, 
+                                'query': actual_query, 
                                 'requester_id': interaction.user.id, 
                                 'requester_name': interaction.user.display_name
                             })
@@ -713,13 +726,28 @@ class Music(commands.Cog):
             # === PRIMARY: Spotify Artist Top Tracks (instant, 100% real) ===
             if sp and artist_name:
                 try:
+                    # Search with multiple strategies for better matching
                     search_result = await asyncio.to_thread(
-                        lambda: sp.search(q=f"artist:{artist_name}", type='artist', limit=1)
+                        lambda: sp.search(q=artist_name, type='artist', limit=5)
                     )
                     artists_list = search_result.get('artists', {}).get('items', [])
-                    if artists_list:
-                        artist_id = artists_list[0]['id']
-                        artist_real_name = artists_list[0]['name']
+                    
+                    # Find the best matching artist (case-insensitive name comparison)
+                    matched_artist = None
+                    artist_name_lower = artist_name.lower().strip()
+                    for a in artists_list:
+                        a_name = a['name'].lower().strip()
+                        if a_name == artist_name_lower or artist_name_lower in a_name or a_name in artist_name_lower:
+                            matched_artist = a
+                            break
+                    if not matched_artist and artists_list:
+                        matched_artist = artists_list[0]  # fallback to top result
+                    
+                    if matched_artist:
+                        artist_id = matched_artist['id']
+                        artist_real_name = matched_artist['name']
+                        log.info(f"[Rec] Spotify matched artist: '{artist_real_name}' (searched: '{artist_name}')")
+                        
                         top_tracks_result = await asyncio.to_thread(
                             lambda: sp.artist_top_tracks(artist_id, country='TW')
                         )
@@ -731,6 +759,11 @@ class Music(commands.Cog):
                             track_name = track['name']
                             t_artist   = track['artists'][0]['name']
                             
+                            # Verify this track's artist actually matches
+                            if t_artist.lower() != artist_real_name.lower():
+                                log.info(f"[Rec] Skipped '{track_name}' by '{t_artist}' (expected '{artist_real_name}')")
+                                continue
+                            
                             # Skip duplicates
                             if _is_dupe_name(track_name):
                                 continue
@@ -740,11 +773,8 @@ class Music(commands.Cog):
                                 any(track_name.lower() in e for e in exclude_titles)):
                                 continue
                             
-                            # Use Spotify track URL for precise playback
-                            # This triggers the existing Spotify→YouTube resolver
-                            # which produces exact search like "milet - Lost (Official Audio)"
-                            spotify_url = track.get('external_urls', {}).get('spotify', '')
-                            play_query = spotify_url if spotify_url else f"{t_artist} - {track_name} (Official Audio)"
+                            # Format: "Artist - Track" — from_query will add (Official Audio)
+                            play_query = f"{t_artist} - {track_name}"
                             
                             resolved.append({
                                 'display': f"{t_artist} - {track_name}",
