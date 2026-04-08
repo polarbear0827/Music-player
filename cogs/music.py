@@ -638,17 +638,16 @@ class Music(commands.Cog):
         played_str = ", ".join(hist) if hist else "無"
 
         sys_prompt = (
-            "你是一個專業且品味極佳的音樂 DJ。請根據使用者提供的『上一首歌』，推薦該歌手最紅、最熱門的 Top 3 歌曲。\n"
-            "【嚴格規定】\n"
-            f"1. 已經播放過的歌曲清單：[{played_str}]。**絕對不要**推薦這些歌！\n"
-            "2. 如果該歌手最熱門的前 3 首歌已經播過了，請自動順延推薦第 4、5、6 名，以此類推。\n"
-            "3. 如果該歌手的歌很少，可以推薦曲風極度相似的同屬性神曲。\n"
-            "4. 只能回傳純 JSON 陣列，這非常重要，不要加上任何其他文字解釋。格式範例: [\"歌手 - 歌名 1\", \"歌手 - 歌名 2\", \"歌手 - 歌名 3\"]"
+            "你是一個專業且資料庫極度精準的音樂 DJ。請根據使用者提供的『上一首歌』，推薦該歌手最紅、且「真實存在」的 Top 3 歌曲。\n"
+            "【最高嚴格規定】\n"
+            "1. 你推薦的歌曲**必須真實存在於世界上**，絕對不可以自己捏造歌名，也不可以把別人的歌張冠李戴給這位歌手！如果該歌手本人真的沒有其他知名的歌，請改為推薦「曲風極度相似的其他相對知名歌手」的真實歌曲。\n"
+            f"2. 已經播放過的歌曲清單：[{played_str}]。**絕對不要**推薦這些歌！如果該歌手最熱門的歌已經播過了，請自動順延推薦他其他真實存在的熱門歌曲。\n"
+            "3. 只能回傳純 JSON 陣列，絕對不能包含任何 Markdown 標籤或多餘文字。格式範例: [\"歌手 - 確實存在的歌名 1\", \"歌手 - 確實存在的歌名 2\", \"歌手 - 確實存在的歌名 3\"]"
         )
         try:
             api_key = GLOBAL_OR_API_KEY
             messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": f"上一首歌：{last_played['query']}"}]
-            raw_text = await call_openrouter(messages, api_key, max_tokens=150)
+            raw_text = await call_openrouter(messages, api_key, max_tokens=150, temperature=0.1)
             
             if raw_text.startswith("```json"): raw_text = raw_text[7:]
             if raw_text.startswith("```"): raw_text = raw_text[3:]
