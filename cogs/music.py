@@ -266,39 +266,43 @@ class DashboardView(discord.ui.View):
                 for i, r in enumerate(rec_data['items']):
                     btn_label = f"➕ {str(r)[:70]}"
                     btn = discord.ui.Button(label=btn_label, style=discord.ButtonStyle.success, row=1)
-                
-                def make_callback(song_query):
-                    async def callback(interaction: discord.Interaction):
-                        queue = self.cog.get_queue(interaction.guild.id)
-                        queue.append({
-                            'id': str(uuid.uuid4()), 
-                            'query': song_query, 
-                            'requester_id': interaction.user.id, 
-                            'requester_name': interaction.user.display_name
-                        })
-                        
-                        vc = interaction.guild.voice_client
-                        if not vc and interaction.user.voice:
-                            vc = await interaction.user.voice.channel.connect()
-                                
-                        await interaction.response.send_message(f"✅ 已為您點播推薦：**{song_query}**", ephemeral=True)
-                        
-                        class FakeCtx:
-                            def __init__(self, bot, guild, channel, vc, user):
-                                self.bot = bot; self.guild = guild; self.channel = channel
-                                self.voice_client = vc; self.author = user
-                                self.message = type('DummyMsg', (), {'author': user})()
-                            async def send(self, *args, **kwargs): pass
+                    
+                    def make_callback(song_query):
+                        async def callback(interaction: discord.Interaction):
+                            queue = self.cog.get_queue(interaction.guild.id)
                             
-                        if vc and not vc.is_playing() and not vc.is_paused():
-                            ctx = FakeCtx(self.cog.bot, interaction.guild, interaction.channel, vc, interaction.user)
-                            self.cog.bot.loop.create_task(self.cog.play_next(ctx))
-                        else:
-                            await self.cog.update_dashboard(interaction.guild, interaction.channel)
-                    return callback
-                
-                btn.callback = make_callback(r)
-                self.add_item(btn)
+                            # Append Official Audio to guarantee high-quality non-live versions
+                            search_query = f"{song_query} Official Audio"
+                            
+                            queue.append({
+                                'id': str(uuid.uuid4()), 
+                                'query': search_query, 
+                                'requester_id': interaction.user.id, 
+                                'requester_name': interaction.user.display_name
+                            })
+                            
+                            vc = interaction.guild.voice_client
+                            if not vc and interaction.user.voice:
+                                vc = await interaction.user.voice.channel.connect()
+                                    
+                            await interaction.response.send_message(f"✅ 已為您點播推薦：**{song_query}**", ephemeral=True)
+                            
+                            class FakeCtx:
+                                def __init__(self, bot, guild, channel, vc, user):
+                                    self.bot = bot; self.guild = guild; self.channel = channel
+                                    self.voice_client = vc; self.author = user
+                                    self.message = type('DummyMsg', (), {'author': user})()
+                                async def send(self, *args, **kwargs): pass
+                                
+                            if vc and not vc.is_playing() and not vc.is_paused():
+                                ctx = FakeCtx(self.cog.bot, interaction.guild, interaction.channel, vc, interaction.user)
+                                self.cog.bot.loop.create_task(self.cog.play_next(ctx))
+                            else:
+                                await self.cog.update_dashboard(interaction.guild, interaction.channel)
+                        return callback
+                    
+                    btn.callback = make_callback(r)
+                    self.add_item(btn)
 
     @discord.ui.button(label="⏯ 暫停/播放", style=discord.ButtonStyle.primary, custom_id="dash_playpause")
     async def play_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -640,9 +644,11 @@ class Music(commands.Cog):
         sys_prompt = (
             "你是一個專業且資料庫極度精準的音樂 DJ。請根據使用者提供的『上一首歌』，推薦該歌手最紅、且「真實存在」的 Top 3 歌曲。\n"
             "【最高嚴格規定】\n"
-            "1. 你推薦的歌曲**必須真實存在於世界上**，絕對不可以自己捏造歌名，也不可以把別人的歌張冠李戴給這位歌手！如果該歌手本人真的沒有其他知名的歌，請改為推薦「曲風極度相似的其他相對知名歌手」的真實歌曲。\n"
-            f"2. 已經播放過的歌曲清單：[{played_str}]。**絕對不要**推薦這些歌！如果該歌手最熱門的歌已經播過了，請自動順延推薦他其他真實存在的熱門歌曲。\n"
-            "3. 只能回傳純 JSON 陣列，絕對不能包含任何 Markdown 標籤或多餘文字。格式範例: [\"歌手 - 確實存在的歌名 1\", \"歌手 - 確實存在的歌名 2\", \"歌手 - 確實存在的歌名 3\"]"
+            "1. 你必須推薦**剛好 3 首**歌曲，絕對不能少於 3 首！\n"
+            "2. 你推薦的歌曲**必須真實存在於世界上**，絕對不可以捏造歌名，或者把別人的歌硬塞給這位歌手！如果該歌手沒有其他知名的歌，請推薦「曲風極度相似的相對知名歌手」的真實歌曲。\n"
+            "3. 推薦的歌名請提供原版官方名稱，**絕對不要**推薦 Live 版、Remix 版或 Cover 版！\n"
+            f"4. 已經播放過的歌曲清單：[{played_str}]。**絕對不要**推薦這些歌！\n"
+            "5. 只能回傳純 JSON 陣列，這非常重要，不要加上任何其他文字解釋。格式範例: [\"歌手 - 確實存在的歌名1\", \"歌手 - 確實存在的歌名2\", \"歌手 - 確實存在的歌名3\"]"
         )
         try:
             api_key = GLOBAL_OR_API_KEY
