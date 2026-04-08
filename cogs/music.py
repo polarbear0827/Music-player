@@ -740,12 +740,16 @@ class Music(commands.Cog):
                                 any(track_name.lower() in e for e in exclude_titles)):
                                 continue
                             
-                            # Spotify data is 100% real — no yt-dlp verification needed!
-                            # Just store the search query for when user clicks the button
+                            # Use Spotify track URL for precise playback
+                            # This triggers the existing Spotify→YouTube resolver
+                            # which produces exact search like "milet - Lost (Official Audio)"
+                            spotify_url = track.get('external_urls', {}).get('spotify', '')
+                            play_query = spotify_url if spotify_url else f"{t_artist} - {track_name} (Official Audio)"
+                            
                             resolved.append({
                                 'display': f"{t_artist} - {track_name}",
                                 'title': f"{t_artist} - {track_name}",
-                                'url': f"{t_artist} {track_name} Official Audio",  # search query for play
+                                'url': play_query,
                             })
                         
                         log.info(f"[Rec] Spotify: {len(top_tracks)} total, {len(resolved)} selected")
