@@ -11,7 +11,7 @@ logger = logging.getLogger('discord')
 
 load_dotenv()
 
-TOKEN = os.getenv('DISCORD_TOKEN')
+TOKEN = os.getenv('DISCORD_TOKEN', '').strip()
 
 class MusicBot(commands.Bot):
     def __init__(self):
