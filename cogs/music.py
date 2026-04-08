@@ -687,7 +687,10 @@ class Music(commands.Cog):
             seen_track_norms = set()
             
             def _is_dupe_name(name):
-                norm = re.sub(r'[^a-z0-9]', '', name.lower())
+                # Remove spaces and punctuation but keep all Unicode word chars (CJK, etc.)
+                norm = re.sub(r'[^\w]', '', name.lower())
+                if not norm:
+                    norm = name.lower().strip()
                 if norm in seen_track_norms:
                     return True
                 seen_track_norms.add(norm)
