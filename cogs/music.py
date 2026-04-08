@@ -572,27 +572,27 @@ class Music(commands.Cog):
         embed.set_footer(text=f"狀態: {status} | 🔁 {LOOP_LABELS[loop_mode]} | 🔊 {volume}% | 這個面板會自動更新")
         view = DashboardView(self, guild.id)
         
-            try:
-                if not force_resend and dash_info and dash_info.get('message'):
-                    try:
-                        await dash_info['message'].edit(embed=embed, view=view)
-                    except discord.errors.NotFound:
-                        msg = await target_channel.send(embed=embed, view=view)
-                        self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
-                else:
-                    if dash_info and dash_info.get('message'):
-                        try: await dash_info['message'].delete()
-                        except: pass
+        try:
+            if not force_resend and dash_info and dash_info.get('message'):
+                try:
+                    await dash_info['message'].edit(embed=embed, view=view)
+                except discord.errors.NotFound:
                     msg = await target_channel.send(embed=embed, view=view)
                     self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
-            except Exception as e:
-                log.error(f"update_dashboard editing failed, fallback to resend: {e}")
-                try:
-                    if dash_info and dash_info.get('message'):
-                        await dash_info['message'].delete()
-                except: pass
+            else:
+                if dash_info and dash_info.get('message'):
+                    try: await dash_info['message'].delete()
+                    except: pass
                 msg = await target_channel.send(embed=embed, view=view)
                 self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
+        except Exception as e:
+            log.error(f"update_dashboard editing failed, fallback to resend: {e}")
+            try:
+                if dash_info and dash_info.get('message'):
+                    await dash_info['message'].delete()
+            except: pass
+            msg = await target_channel.send(embed=embed, view=view)
+            self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
 
     @commands.Cog.listener()
     async def on_message(self, message):
