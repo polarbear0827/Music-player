@@ -713,8 +713,20 @@ class Music(commands.Cog):
             
             if sp:
                 try:
-                    search_title = re.sub(r'\(Official.*?\)|\[.*?\]|Official Video|Official Audio|MV|MUSIC VIDEO|Music Video|Lyrics?|feat\..*', '', last_title, flags=re.IGNORECASE).strip()
-                    search_title = re.sub(r'[「」『』【】（）\(\)\-]', ' ', search_title).strip()
+                    # Robust cleaning
+                    search_title = last_title
+                    # Remove brackets completely
+                    search_title = re.sub(r'\[.*?\]|【.*?】|「.*?」|『.*?』', ' ', search_title)
+                    # Remove common noise words
+                    noise_patterns = [
+                        r'official.*?video', r'official.*?audio', r'official.*?lyric', r'official.*?mv',
+                        r'lyric.*?video', r'music.*?video', r'official', r'lyrics?', r'\bmv\b', r'feat\..*', 
+                        r'\blive\b', r'\baudio\b'
+                    ]
+                    for p in noise_patterns:
+                        search_title = re.sub(p, ' ', search_title, flags=re.IGNORECASE)
+                    
+                    search_title = re.sub(r'[（）\(\)\-｜|]', ' ', search_title).strip()
                     search_title = re.sub(r'\s+', ' ', search_title).strip()[:80]
                     
                     log.info(f"[Rec] Searching Spotify track: '{search_title}'")
@@ -725,13 +737,32 @@ class Music(commands.Cog):
                     tracks_found = track_search.get('tracks', {}).get('items', [])
                     
                     if tracks_found:
-                        best_track = tracks_found[0]
-                        artist_id = best_track['artists'][0]['id']
-                        artist_real_name = best_track['artists'][0]['name']
-                        log.info(f"[Rec] Found artist: '{artist_real_name}' (id: {artist_id})")
+                        best_track = None
+                        search_words = set(search_title.lower().split())
                         
-                        # Also exclude the current song's Spotify name
-                        _is_dupe_name(best_track['name'])  # Mark current song as seen
+                        for track in tracks_found:
+                            t_name = track['name'].lower()
+                            a_name = track['artists'][0]['name'].lower()
+                            
+                            # Simple fuzzy check: at least one matching word, or substring match
+                            # Also normalize removing special characters for word matching
+                            track_words = set(re.sub(r'[^a-z0-9\u4e00-\u9fa5\u3040-\u30ff]', ' ', t_name + ' ' + a_name).split())
+                            search_words_norm = set(re.sub(r'[^a-z0-9\u4e00-\u9fa5\u3040-\u30ff]', ' ', search_title.lower()).split())
+                            
+                            common = search_words_norm.intersection(track_words)
+                            if common or a_name in search_title.lower() or t_name in search_title.lower() or search_title.lower() in t_name:
+                                best_track = track
+                                break
+                        
+                        if not best_track:
+                            log.warning(f"[Rec] Spotify returned tracks but none matched query '{search_title}'. First result was: {tracks_found[0]['artists'][0]['name']} - {tracks_found[0]['name']}")
+                        else:
+                            artist_id = best_track['artists'][0]['id']
+                            artist_real_name = best_track['artists'][0]['name']
+                            log.info(f"[Rec] Found artist: '{artist_real_name}' (id: {artist_id})")
+                            
+                            # Also exclude the current song's Spotify name
+                            _is_dupe_name(best_track['name'])  # Mark current song as seen
                 except Exception as e:
                     log.error(f"[Rec] Spotify track search failed: {e}")
             
