@@ -264,28 +264,35 @@ class DashboardView(discord.ui.View):
             
             if match_curr or match_hist:
                 for i, r in enumerate(rec_data['items']):
-                    btn_label = f"➕ {str(r)[:70]}"
+                    # Each item is now a dict: {'title': real_yt_title, 'url': real_yt_url}
+                    if isinstance(r, dict):
+                        display_label = r.get('title', str(r))[:70]
+                        play_query   = r.get('url') or r.get('title', str(r))
+                    else:
+                        display_label = str(r)[:70]
+                        play_query   = str(r)
+                    
+                    btn_label = f"➕ {display_label}"
                     btn = discord.ui.Button(label=btn_label, style=discord.ButtonStyle.success, row=1)
                     
-                    def make_callback(song_query):
+                    def make_callback(song_query, song_display):
                         async def callback(interaction: discord.Interaction):
                             queue = self.cog.get_queue(interaction.guild.id)
-                            
-                            # Append Official Audio to guarantee high-quality non-live versions
-                            search_query = f"{song_query} Official Audio"
-                            
                             queue.append({
                                 'id': str(uuid.uuid4()), 
-                                'query': search_query, 
+                                'query': song_query, 
                                 'requester_id': interaction.user.id, 
                                 'requester_name': interaction.user.display_name
                             })
+                            
+                            # Clear recommendations so buttons disappear after selection
+                            self.cog.recommendations.pop(interaction.guild.id, None)
                             
                             vc = interaction.guild.voice_client
                             if not vc and interaction.user.voice:
                                 vc = await interaction.user.voice.channel.connect()
                                     
-                            await interaction.response.send_message(f"✅ 已為您點播推薦：**{song_query}**", ephemeral=True)
+                            await interaction.response.send_message(f"✅ 已為您點播：**{song_display}**", ephemeral=True)
                             
                             class FakeCtx:
                                 def __init__(self, bot, guild, channel, vc, user):
@@ -301,7 +308,7 @@ class DashboardView(discord.ui.View):
                                 await self.cog.update_dashboard(interaction.guild, interaction.channel)
                         return callback
                     
-                    btn.callback = make_callback(r)
+                    btn.callback = make_callback(play_query, display_label)
                     self.add_item(btn)
 
     @discord.ui.button(label="⏯ 暫停/播放", style=discord.ButtonStyle.primary, custom_id="dash_playpause")
@@ -631,6 +638,28 @@ class Music(commands.Cog):
             log.error(f"OpenRouter error: {e}")
             return f"🎵 **Now playing:** {song_title}\n*(Requested by {requester})*"
 
+    async def _resolve_yt_search(self, search_query: str):
+        """Search YouTube with yt-dlp and return the first real result as {'title', 'url'}."""
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'format': 'bestaudio/best',
+            'default_search': 'ytsearch1',
+            'noplaylist': True,
+        }
+        try:
+            data = await asyncio.to_thread(
+                lambda: __import__('yt_dlp').YoutubeDL(ydl_opts).extract_info(search_query, download=False)
+            )
+            if data and 'entries' in data and data['entries']:
+                entry = data['entries'][0]
+                return {'title': entry.get('title', search_query), 'url': entry.get('webpage_url', search_query)}
+            elif data and data.get('webpage_url'):
+                return {'title': data.get('title', search_query), 'url': data['webpage_url']}
+        except Exception as e:
+            log.error(f"yt-search failed for '{search_query}': {e}")
+        return None
+
     async def fetch_and_show_recommendations(self, guild, channel, last_played):
         if self.recommendations.get(guild.id, {}).get('base_query') == last_played['query']:
             return # Already tracking this song
@@ -642,26 +671,32 @@ class Music(commands.Cog):
         played_str = ", ".join(hist) if hist else "無"
 
         sys_prompt = (
-            "你是一個專業且資料庫極度精準的音樂 DJ。請根據使用者提供的『上一首歌』，推薦該歌手最紅、且「真實存在」的 Top 3 歌曲。\n"
-            "【最高嚴格規定】\n"
-            "1. 你必須推薦**剛好 3 首**歌曲，絕對不能少於 3 首！\n"
-            "2. 你推薦的歌曲**必須真實存在於世界上**，絕對不可以捏造歌名，或者把別人的歌硬塞給這位歌手！如果該歌手沒有其他知名的歌，請推薦「曲風極度相似的相對知名歌手」的真實歌曲。\n"
-            "3. 推薦的歌名請提供原版官方名稱，**絕對不要**推薦 Live 版、Remix 版或 Cover 版！\n"
-            f"4. 已經播放過的歌曲清單：[{played_str}]。**絕對不要**推薦這些歌！\n"
-            "5. 只能回傳純 JSON 陣列，這非常重要，不要加上任何其他文字解釋。格式範例: [\"歌手 - 確實存在的歌名1\", \"歌手 - 確實存在的歌名2\", \"歌手 - 確實存在的歌名3\"]"
+            "你是一個專業且被信任的音樂 DJ。根據『上一首歌』，列出 5 個對于 YouTube 最有效的「搜尋關鍵字」，用來找到相同歌手最熱門、可能存在於 YouTube 上的官方歌曲。\n"
+            "【規定】\n"
+            f"1. 已播清單：[{played_str}]。不要推薦這些！\n"
+            "2. 搜尋關鍵字格式：「歌手名 歌名 Official Audio」，只用英文或對應的原文對应名稱，不要翻譯第三方名稱。\n"
+            "3. 只能回傳純 JSON 陣列，5 個對應字串元素，不要加任何其他文字。範例: [\"Sunset Rollercoaster Candlelight Official Audio\", \"Sunset Rollercoaster My Jinji Official Audio\", \"Sunset Rollercoaster Jinji Kikko Official Audio\", \"Sunset Rollercoaster Jinji Kikko Official Audio\", \"Sunset Rollercoaster Vanilla Official Audio\"]"
         )
         try:
             api_key = GLOBAL_OR_API_KEY
-            messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": f"上一首歌：{last_played['query']}"}]
-            raw_text = await call_openrouter(messages, api_key, max_tokens=150, temperature=0.1)
+            messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": f"上一首歌：{last_played.get('title') or last_played['query']}"}]
+            raw_text = await call_openrouter(messages, api_key, max_tokens=200, temperature=0.1)
             
             if raw_text.startswith("```json"): raw_text = raw_text[7:]
             if raw_text.startswith("```"): raw_text = raw_text[3:]
             if raw_text.endswith("```"): raw_text = raw_text[:-3]
             
-            recs = json.loads(raw_text.strip())
-            if isinstance(recs, list) and len(recs) > 0:
-                self.recommendations[guild.id]['items'] = recs[:3]
+            search_keywords = json.loads(raw_text.strip())
+            if isinstance(search_keywords, list) and len(search_keywords) > 0:
+                # Use yt-dlp to resolve each search keyword into real title + URL
+                resolved = []
+                for kw in search_keywords[:5]:  # Try up to 5, keep first 3 valid ones
+                    if len(resolved) >= 3:
+                        break
+                    result = await self._resolve_yt_search(str(kw))
+                    if result:
+                        resolved.append(result)
+                self.recommendations[guild.id]['items'] = resolved
         except Exception as e:
             log.error(f"Failed to fetch recommendations: {e}")
             
