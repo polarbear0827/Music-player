@@ -550,8 +550,8 @@ class Music(commands.Cog):
     async def get_dj_intro(self, song_title: str, requester: str, requester_id: int = None) -> str:
         api_key = get_user_api_key(requester_id) if requester_id else GLOBAL_OR_API_KEY
         
-        prompt = (f"你現在是在 Discord 上的溫馨音樂廣播 DJ。即將播放的歌是『{song_title}』，點播者是『{requester}』。"
-                  "請用10~30個繁體中文字說一句鼓勵或溫馨的話介紹這首歌，結尾加一個表情符號。不要加上任何其他的解釋或標題。")
+        prompt = (f"你現在是在 Discord 上的音樂 DJ。即將播放：『{song_title}』，點播者：『{requester}』。"
+                  "請在10個繁體中文字以內給出一句最簡短的介紹，結尾加一個表情符號。絕對不要廢話、不要其他文字。")
         try:
             dj_msg = await call_openrouter([{"role": "user", "content": prompt}], api_key, max_tokens=60)
             return f"🎙️ **DJ:** 「*{dj_msg}*」\n🎵 **Now playing:** {song_title}"
