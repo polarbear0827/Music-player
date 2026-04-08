@@ -20,7 +20,7 @@ class MusicBot(commands.Bot):
         intents.voice_states = True
         
         super().__init__(
-            command_prefix=commands.when_mentioned_or('F!'),
+            command_prefix=commands.when_mentioned_or('F!', 'f!'),
             intents=intents,
             help_command=commands.DefaultHelpCommand(),
             case_insensitive=True
