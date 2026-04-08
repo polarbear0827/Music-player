@@ -15,7 +15,8 @@ import os
 from dotenv import load_dotenv
 import json
 import aiohttp
-
+import uuid
+import html
 load_dotenv()
 
 # Loop mode constants
@@ -28,7 +29,8 @@ LOOP_LABELS = {LOOP_OFF: "關閉", LOOP_SINGLE: "單曲循環 🔂", LOOP_QUEUE:
 log = logging.getLogger(__name__)
 
 # OpenRouter / Database Setup
-GLOBAL_OR_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
+GLOBAL_OR_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+GLOBAL_GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 def get_user_api_key(user_id: int) -> str:
     """Retrieve API key from SQLite database initialized in sticker.py"""
@@ -42,7 +44,7 @@ def get_user_api_key(user_id: int) -> str:
     return GLOBAL_OR_API_KEY
 
 async def call_openrouter(messages: list, api_key: str, max_tokens: int, temperature: float = 0.7) -> str:
-    """Make HTTP request to OpenRouter API."""
+    """Make HTTP request to OpenRouter API, with Groq fallback."""
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -71,8 +73,36 @@ async def call_openrouter(messages: list, api_key: str, max_tokens: int, tempera
                     return "..." # Fallback for empty content
                 raise Exception(f"OpenRouter Unexpected Response: {data}")
     except Exception as e:
-        log.error(f"call_openrouter error: {e}")
-        raise e
+        log.warning(f"OpenRouter failed, falling back to Groq: {e}")
+        try:
+            groq_url = "https://api.groq.com/openai/v1/chat/completions"
+            groq_headers = {
+                "Authorization": f"Bearer {GLOBAL_GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            # Fallback uses light and fast LLaMA 3.1 8B on Groq
+            groq_payload = {
+                "model": "llama-3.1-8b-instant",
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(groq_url, headers=groq_headers, json=groq_payload, timeout=20) as resp:
+                    if resp.status != 200:
+                        err_data = await resp.text()
+                        raise Exception(f"Groq HTTP {resp.status}: {err_data}")
+                    
+                    data = await resp.json()
+                    if "choices" in data and len(data["choices"]) > 0:
+                        content = data["choices"][0].get("message", {}).get("content")
+                        if content is not None:
+                            return str(content).strip()
+                        return "..." 
+                    raise Exception(f"Groq Unexpected Response: {data}")
+        except Exception as groq_e:
+            log.error(f"Groq fallback also failed: {groq_e}")
+            raise e # re-raise the original OpenRouter exception if fallback fails
 
 
 # yt-dlp Configuration
@@ -90,6 +120,7 @@ YTDL_OPTIONS = {
     'no_warnings': True,
     'default_search': 'auto',
     'source_address': '0.0.0.0', 
+    'socket_timeout': 15,
 }
 
 FFMPEG_OPTIONS = {
@@ -107,7 +138,7 @@ spotify_client_secret = os.getenv('SPOTIPY_CLIENT_SECRET')
 sp = None
 if spotify_client_id and spotify_client_secret and spotify_client_id != "your_spotify_client_id_here":
     auth_manager = SpotifyClientCredentials(client_id=spotify_client_id, client_secret=spotify_client_secret)
-    sp = spotipy.Spotify(auth_manager=auth_manager)
+    sp = spotipy.Spotify(auth_manager=auth_manager, status_retries=0, requests_timeout=10)
 else:
     log.warning("Spotify credentials not configured correctly. Spotify link parsing will fail.")
 
@@ -134,10 +165,10 @@ def get_apple_music_title(url: str) -> str:
         
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
         with urllib.request.urlopen(req, timeout=5) as response:
-            html = response.read().decode('utf-8', errors='ignore')
-            match = re.search(r'<title>(.*?)</title>', html, flags=re.IGNORECASE)
+            html_text = response.read().decode('utf-8', errors='ignore')
+            match = re.search(r'<title>(.*?)</title>', html_text, flags=re.IGNORECASE)
             if match:
-                title = match.group(1).replace(" on Apple Music", "")
+                title = html.unescape(match.group(1)).replace(" on Apple Music", "")
                 title = title.replace(" - Single", "").replace(" - EP", "")
                 title = title.replace("\u200e", "") # Remove zero-width spaces
                 return f"{title} (Official Audio)"
@@ -335,9 +366,9 @@ class Music(commands.Cog):
         self.loop_mode = {} # {guild_id: int}
         # Volume: 0.0-1.0 per guild
         self.volumes = {} # {guild_id: float}
-        # Song start time for progress bar
         self.song_start_time = {} # {guild_id: float}
         self.dash_cooldown = {} # {guild_id: float}
+        self.dashboard_locks = {}
         
         # SQLite Database Integration for Ranking System
         self._init_db()
@@ -487,18 +518,22 @@ class Music(commands.Cog):
         embed.set_footer(text=f"狀態: {status} | 🔁 {LOOP_LABELS[loop_mode]} | 🔊 {volume}% | 這個面板會自動更新")
         view = DashboardView(self)
         
-        try:
-            if not force_resend and dash_info and dash_info.get('message'):
-                await dash_info['message'].edit(embed=embed, view=view)
-            else:
-                if dash_info and dash_info.get('message'):
-                    try: await dash_info['message'].delete()
-                    except: pass
+        if guild.id not in self.dashboard_locks:
+            self.dashboard_locks[guild.id] = asyncio.Lock()
+            
+        async with self.dashboard_locks[guild.id]:
+            try:
+                if not force_resend and dash_info and dash_info.get('message'):
+                    await dash_info['message'].edit(embed=embed, view=view)
+                else:
+                    if dash_info and dash_info.get('message'):
+                        try: await dash_info['message'].delete()
+                        except: pass
+                    msg = await target_channel.send(embed=embed, view=view)
+                    self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
+            except Exception:
                 msg = await target_channel.send(embed=embed, view=view)
                 self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
-        except Exception:
-            msg = await target_channel.send(embed=embed, view=view)
-            self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -540,6 +575,8 @@ class Music(commands.Cog):
 
                 if self.current_song.get(ctx.guild.id) is not None:
                     self.get_history(ctx.guild.id).append(self.current_song[ctx.guild.id])
+                    if len(self.histories[ctx.guild.id]) > 200:
+                        self.histories[ctx.guild.id].pop(0)
 
             self.current_song[ctx.guild.id] = item
 
@@ -591,9 +628,10 @@ class Music(commands.Cog):
                     self.last_dj_msg[ctx.guild.id] = ""
                     await self.update_dashboard(ctx.guild, ctx.channel, force_resend=True)
                 except Exception as e:
-                    await ctx.send(f"❌ 無法連線至直播源。", delete_after=5)
-                    self.active_radios.pop(ctx.guild.id, None)
-                    self.is_playing_radio.discard(ctx.guild.id)
+                    log.error(f"Radio stream error: {e}")
+                    await ctx.send(f"⚠️ 無法連線至直播源，10秒後將自動重連...", delete_after=10)
+                    await asyncio.sleep(10)
+                    self.bot.loop.create_task(self.play_next(ctx))
             else:
                 self.last_dj_msg[ctx.guild.id] = ""
                 await self.update_dashboard(ctx.guild, ctx.channel, force_resend=True)
@@ -711,7 +749,7 @@ class Music(commands.Cog):
         
         # Enqueue the structured items
         for q in queries:
-            item = {'query': q, 'requester_id': ctx.author.id, 'requester_name': ctx.author.display_name}
+            item = {'id': str(uuid.uuid4()), 'query': q, 'requester_id': ctx.author.id, 'requester_name': ctx.author.display_name}
             queue.append(item)
             
         if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
@@ -751,14 +789,14 @@ class Music(commands.Cog):
             if raw_text.endswith("```"): raw_text = raw_text[:-3]
             
             song_list = json.loads(raw_text.strip())
-            if not song_list:
+            if not isinstance(song_list, list) or len(song_list) == 0:
                 return await msg.edit(content="❌ 抱歉，DJ 想不到適合的歌，請換個情境說法！")
             
             song = song_list[0]
             await msg.edit(content=f"✅ DJ 靈光一閃！推薦了這首：**{song}**\n正在為您加入列隊中...")
             
             queue = self.get_queue(ctx.guild.id)
-            item = {'query': song, 'requester_id': ctx.author.id, 'requester_name': ctx.author.display_name}
+            item = {'id': str(uuid.uuid4()), 'query': song, 'requester_id': ctx.author.id, 'requester_name': ctx.author.display_name}
             queue.append(item)
 
             channel = ctx.message.author.voice.channel
@@ -807,8 +845,9 @@ class Music(commands.Cog):
             return await ctx.send("The queue is currently empty.")
             
         display_limit = 10
+        snapshot = queue[:display_limit]
         q_list = "**Select a song to remove by replying with its number within 30s:**\n"
-        for i, item in enumerate(queue[:display_limit]):
+        for i, item in enumerate(snapshot):
             query_label = item['query']
             if 'http' in query_label:
                 query_label = f"[URL Link] requested by {item['requester_name']}"
@@ -824,9 +863,17 @@ class Music(commands.Cog):
         try:
             choice_msg = await self.bot.wait_for('message', timeout=30.0, check=check)
             choice = int(choice_msg.content)
-            if 1 <= choice <= len(queue[:display_limit]):
-                removed_item = queue.pop(choice - 1)
-                await ctx.send(f"🗑️ Removed item from queue: `{str(removed_item['query'])[:50]}`")
+            if 1 <= choice <= len(snapshot):
+                target_uuid = snapshot[choice - 1]['id']
+                removed_item = None
+                for idx, q_item in enumerate(queue):
+                    if q_item['id'] == target_uuid:
+                        removed_item = queue.pop(idx)
+                        break
+                if removed_item:
+                    await ctx.send(f"🗑️ Removed item from queue: `{str(removed_item['query'])[:50]}`")
+                else:
+                    await ctx.send("❌ The selected song was already played or removed.")
             else:
                 await ctx.send("❌ Invalid number selection.")
         except asyncio.TimeoutError:
@@ -993,16 +1040,18 @@ class Music(commands.Cog):
             period = 'all time'
             
         try:
-            self.cursor.execute(f'''
-                SELECT user_name, COUNT(id) as score 
-                FROM play_history 
-                WHERE guild_id = ? {query_modifier}
-                GROUP BY user_id 
-                ORDER BY score DESC 
-                LIMIT 10
-            ''', (ctx.guild.id,))
+            def db_rank():
+                self.cursor.execute(f'''
+                    SELECT user_name, COUNT(id) as score 
+                    FROM play_history 
+                    WHERE guild_id = ? {query_modifier}
+                    GROUP BY user_id 
+                    ORDER BY score DESC 
+                    LIMIT 10
+                ''', (ctx.guild.id,))
+                return self.cursor.fetchall()
             
-            results = self.cursor.fetchall()
+            results = await asyncio.to_thread(db_rank)
             
             if not results:
                 return await ctx.send(f"🏅 No ranking data available for {period}.")
@@ -1030,20 +1079,26 @@ class Music(commands.Cog):
             return await ctx.send("❌ 目前列隊是空的，沒有東西可儲存！")
             
         try:
-            self.cursor.execute('INSERT OR IGNORE INTO playlists (guild_id, creator_id, name) VALUES (?, ?, ?)', (ctx.guild.id, ctx.author.id, name))
-            self.conn.commit()
-            
-            self.cursor.execute('SELECT id FROM playlists WHERE guild_id = ? AND name = ?', (ctx.guild.id, name))
-            row = self.cursor.fetchone()
-            if not row:
-                return await ctx.send("❌ 儲存失敗。")
-            pl_id = row[0]
-            
-            self.cursor.execute('DELETE FROM playlist_items WHERE playlist_id = ?', (pl_id,))
-            for item in queue:
-                self.cursor.execute('INSERT INTO playlist_items (playlist_id, query) VALUES (?, ?)', (pl_id, item['query']))
+            def db_save():
+                self.cursor.execute('INSERT OR IGNORE INTO playlists (guild_id, creator_id, name) VALUES (?, ?, ?)', (ctx.guild.id, ctx.author.id, name))
+                self.conn.commit()
                 
-            self.conn.commit()
+                self.cursor.execute('SELECT id FROM playlists WHERE guild_id = ? AND name = ?', (ctx.guild.id, name))
+                row = self.cursor.fetchone()
+                if not row:
+                    return False
+                pl_id = row[0]
+                
+                self.cursor.execute('DELETE FROM playlist_items WHERE playlist_id = ?', (pl_id,))
+                for item in queue:
+                    self.cursor.execute('INSERT INTO playlist_items (playlist_id, query) VALUES (?, ?)', (pl_id, item['query']))
+                    
+                self.conn.commit()
+                return True
+                
+            success = await asyncio.to_thread(db_save)
+            if not success:
+                return await ctx.send("❌ 儲存失敗。")
             await ctx.send(f"✅ 成功將 {len(queue)} 首歌儲存至專屬清單：**{name}**")
         except Exception as e:
             await ctx.send(f"❌ 儲存發生錯誤：{e}")
@@ -1051,14 +1106,18 @@ class Music(commands.Cog):
     @playlist.command(name='load', help='Load a named playlist into the queue')
     async def playlist_load(self, ctx, *, name: str):
         try:
-            self.cursor.execute('SELECT id FROM playlists WHERE guild_id = ? AND name = ?', (ctx.guild.id, name))
-            row = self.cursor.fetchone()
-            if not row:
-                return await ctx.send(f"❌ 找不到名為 **{name}** 的清單！請確認名稱是否正確。")
+            def db_load():
+                self.cursor.execute('SELECT id FROM playlists WHERE guild_id = ? AND name = ?', (ctx.guild.id, name))
+                row = self.cursor.fetchone()
+                if not row: return None
                 
-            pl_id = row[0]
-            self.cursor.execute('SELECT query FROM playlist_items WHERE playlist_id = ?', (pl_id,))
-            items = self.cursor.fetchall()
+                pl_id = row[0]
+                self.cursor.execute('SELECT query FROM playlist_items WHERE playlist_id = ?', (pl_id,))
+                return self.cursor.fetchall()
+            
+            items = await asyncio.to_thread(db_load)
+            if items is None:
+                return await ctx.send(f"❌ 找不到名為 **{name}** 的清單！請確認名稱是否正確。")
             
             if not items:
                 return await ctx.send(f"⚠️ 清單 **{name}** 裡面沒有任何歌曲。")
@@ -1087,8 +1146,10 @@ class Music(commands.Cog):
 
     @playlist.command(name='list', help='List all saved playlists for this server')
     async def playlist_list(self, ctx):
-        self.cursor.execute('SELECT name FROM playlists WHERE guild_id = ?', (ctx.guild.id,))
-        rows = self.cursor.fetchall()
+        def db_list():
+            self.cursor.execute('SELECT name FROM playlists WHERE guild_id = ?', (ctx.guild.id,))
+            return self.cursor.fetchall()
+        rows = await asyncio.to_thread(db_list)
         if not rows:
             return await ctx.send("📦 目前這個伺服器還沒有任何私房清單，用 `F!playlist save <名稱>` 建立一個專屬回憶吧！")
             
@@ -1102,8 +1163,11 @@ class Music(commands.Cog):
             return await ctx.send("你必須先進入語音頻道！")
             
         # Get random historic song that actually has a query and title
-        self.cursor.execute('SELECT query, title FROM play_history WHERE guild_id = ? AND query IS NOT NULL AND title IS NOT NULL ORDER BY RANDOM() LIMIT 1', (ctx.guild.id,))
-        row = self.cursor.fetchone()
+        def db_guess():
+            self.cursor.execute('SELECT query, title FROM play_history WHERE guild_id = ? AND query IS NOT NULL AND title IS NOT NULL ORDER BY RANDOM() LIMIT 1', (ctx.guild.id,))
+            return self.cursor.fetchone()
+            
+        row = await asyncio.to_thread(db_guess)
         if not row:
             return await ctx.send("❌ 你們的點播歷史太少了，無法啟動猜歌遊戲！趕快多點幾首 YouTube 的歌進來吧！")
             
@@ -1122,12 +1186,6 @@ class Music(commands.Cog):
             ctx.voice_client.stop() 
             await asyncio.sleep(0.5) # Give it half a sec to flush stream
 
-        start_time = random.randint(15, 60)
-        game_ffmpeg_options = {
-            'before_options': f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -ss {start_time}',
-            'options': '-vn',
-        }
-        
         try:
             msg = await ctx.send("🎲 **猜歌挑戰開始！**\n正在載入神秘片段...\n*(你有 20 秒鐘的時間，第一個在聊天室給出『正確歌名關鍵字』的人就能得分！)*")
             
@@ -1135,6 +1193,17 @@ class Music(commands.Cog):
             data = await loop.run_in_executor(None, lambda: ytdl.extract_info(query, download=False))
             if 'entries' in data: data = data['entries'][0]
             filename = data['url']
+            duration = data.get('duration', 60)
+            if duration and duration > 20:
+                start_time = random.randint(0, min(60, int(duration) - 15))
+            else:
+                start_time = 0
+                
+            game_ffmpeg_options = {
+                'before_options': f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -ss {start_time}',
+                'options': '-vn',
+            }
+            
             player_audio = discord.FFmpegPCMAudio(filename, **game_ffmpeg_options)
             
             ctx.voice_client.play(discord.PCMVolumeTransformer(player_audio, 0.5))
@@ -1148,12 +1217,15 @@ class Music(commands.Cog):
                 ctx.voice_client.stop()
                 
                 # Add score
-                self.cursor.execute('INSERT OR IGNORE INTO guess_scores (guild_id, user_id, user_name, score) VALUES (?, ?, ?, 0)', (ctx.guild.id, winner_msg.author.id, winner_msg.author.display_name))
-                self.cursor.execute('UPDATE guess_scores SET score = score + 1 WHERE guild_id = ? AND user_id = ?', (ctx.guild.id, winner_msg.author.id))
-                self.conn.commit()
-                
-                self.cursor.execute('SELECT score FROM guess_scores WHERE guild_id = ? AND user_id = ?', (ctx.guild.id, winner_msg.author.id))
-                points = self.cursor.fetchone()[0]
+                def db_win():
+                    self.cursor.execute('INSERT OR IGNORE INTO guess_scores (guild_id, user_id, user_name, score) VALUES (?, ?, ?, 0)', (ctx.guild.id, winner_msg.author.id, winner_msg.author.display_name))
+                    self.cursor.execute('UPDATE guess_scores SET score = score + 1 WHERE guild_id = ? AND user_id = ?', (ctx.guild.id, winner_msg.author.id))
+                    self.conn.commit()
+                    
+                    self.cursor.execute('SELECT score FROM guess_scores WHERE guild_id = ? AND user_id = ?', (ctx.guild.id, winner_msg.author.id))
+                    return self.cursor.fetchone()[0]
+                    
+                points = await asyncio.to_thread(db_win)
                 
                 await ctx.send(f"🎉 恭喜 {winner_msg.author.mention} 猜對了！\n這首歌是：**{title}**\n目前總分：`{points} 分`")
             except asyncio.TimeoutError:

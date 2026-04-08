@@ -39,13 +39,15 @@
 支援 `F!rank day / month / year / all`，一眼看出群組裡的隱藏重度點歌王是誰！
 
 ### 🛡️ 企業級防護機制 (Security & Stability)
-機器人內建「防呆三煞車」，不畏懼群組裡搗亂的使用者：
-1. **防止 AI 惡意癱瘓**：加上 10 秒硬性冷卻鎖與 150 字 Prompt 截斷。
+機器人內建「防呆八煞車」，不畏懼群組裡搗亂的使用者：
+1. **防止 AI 惡意癱瘓**：加上 10 秒硬性冷卻鎖與 150 字 Prompt 截斷。**新版內建 OpenRouter 與 Groq 雙智慧引擎備援機制 (Fallback)!**
 2. **防死檔遞迴當機**：YouTube 發生死檔時永遠冷卻 2 秒鐘再繼續播下首，不傷系統計算力。
-3. **無痛刪歌 (`F!remove`) 防撞鎖**：具備絕對伺服器 5 秒鎖，絕不會發生兩人在刪歌時因清單位移而發生的誤刪災難。
-4. **巨型清單防爆閥**：Spotify 單次最高載入 200 首歌，完美拒絕千萬首垃圾清單洗版。
-5. **高效能 HLS 緩衝**：調優 FFmpeg 參數（`probesize/analyzeduration`），徹底解決 HLS 直播卡頓與 403 報錯。
-6. **選單防崩潰 (`Sticker`)**：自動處理訊息刪除衝突，搜尋貼圖不再當機。
+3. **無痛刪歌 (`F!remove`) 防撞鎖**：自研 UUID 快照比對尋址，徹底解決切歌期間陣列位移導致的「殺錯歌」災難！
+4. **巨型清單防爆閥**：Spotify 單次最高載入 200 首歌，且內嵌 Timeout 脫離機制，拒絕千萬首垃圾清單導致連線池枯竭。
+5. **資料庫背景引擎**：全系統 SQLite 讀寫接軌防卡頓 Thread Pool，萬人伺服器運轉保證行雲流水。
+6. **面板雙胞胎免疫**：引入核心級非同步鎖 (`asyncio.Lock`)，完全杜絕手殘狂點造成的面版崩壞複製蟲。
+7. **嚴格的記憶體把控**：歷史查詢緩存最高極限鎖定 200 首（避開背景電台污染），阻絕無限循環導致的 OOM 崩潰。
+8. **電台韌性連線**：廣播遭遇暫時性網路阻斷時不罷工，直接排定 10 秒後「韌性重啟連線」，確保沉浸式體驗永不斷電。
 
 ---
 
@@ -71,7 +73,9 @@ DISCORD_TOKEN=your_token_here
 SPOTIPY_CLIENT_ID=your_client_id_here
 SPOTIPY_CLIENT_SECRET=your_client_secret_here
 
-# Groq 智慧推理金鑰 (電台 DJ 對話引擎，非常關鍵！)
+# Groq 智慧推理金鑰 (電台 DJ 高速備援引擎，確保無縫廣播！新版功能！)
+GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxx
+
 # OpenRouter 智慧推理金鑰 (電台 DJ 對話引擎，支援最新 Minimax-M2.5-Free！)
 OPENROUTER_API_KEY=sk-or-v1-xxxxxxxxxxxxxxxxxxxxxxxx
 
