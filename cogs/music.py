@@ -535,11 +535,12 @@ class Music(commands.Cog):
             
             if dj_txt: 
                 embed.description = dj_txt
-                now_val = f"*(點播者: {current['requester_name']})*"
-                embed.add_field(name="🎵 正在為您播放", value=now_val, inline=False)
+                now_val = f"{current['requester_name']}"
+                embed.add_field(name="👤 點播者", value=now_val, inline=False)
             else:
-                now_val = f"**{title_text}**\n*(點播者: {current['requester_name']})*"
+                now_val = f"**{title_text}**"
                 embed.add_field(name="🎵 Now playing", value=now_val, inline=False)
+                embed.add_field(name="👤 點播者", value=f"{current['requester_name']}", inline=False)
         elif is_radio:
             embed.description = ""
             embed.add_field(name="📻 24H 沉浸電台模式", value=f"**{self.active_radios.get(guild.id, 'Radio').upper()} Radio** 聯播中...", inline=False)
@@ -633,8 +634,17 @@ class Music(commands.Cog):
         self.recommendations[guild.id] = {'base_query': last_played['query'], 'loading': True, 'items': []}
         await self.update_dashboard(guild, channel)
         
-        sys_prompt = ("你是一個專業音樂 DJ。根據使用者提供的上一首歌曲，推薦 3 首相關的歌曲（風格相近、同一歌手或年代相近）。"
-                      "嚴格規定：只能回傳純 JSON 陣列，不要有任何其他文字。格式範例: [\"Artist - Song 1\", \"Artist - Song 2\", \"Artist - Song 3\"]")
+        hist = [str(item.get('title') or item.get('query')) for item in self.get_history(guild.id)[-30:]]
+        played_str = ", ".join(hist) if hist else "無"
+
+        sys_prompt = (
+            "你是一個專業且品味極佳的音樂 DJ。請根據使用者提供的『上一首歌』，推薦該歌手最紅、最熱門的 Top 3 歌曲。\n"
+            "【嚴格規定】\n"
+            f"1. 已經播放過的歌曲清單：[{played_str}]。**絕對不要**推薦這些歌！\n"
+            "2. 如果該歌手最熱門的前 3 首歌已經播過了，請自動順延推薦第 4、5、6 名，以此類推。\n"
+            "3. 如果該歌手的歌很少，可以推薦曲風極度相似的同屬性神曲。\n"
+            "4. 只能回傳純 JSON 陣列，這非常重要，不要加上任何其他文字解釋。格式範例: [\"歌手 - 歌名 1\", \"歌手 - 歌名 2\", \"歌手 - 歌名 3\"]"
+        )
         try:
             api_key = GLOBAL_OR_API_KEY
             messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": f"上一首歌：{last_played['query']}"}]
