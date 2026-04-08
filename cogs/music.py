@@ -248,9 +248,48 @@ class YTDLSource(discord.PCMVolumeTransformer):
         return cls(discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS), data=data)
 
 class DashboardView(discord.ui.View):
-    def __init__(self, cog):
+    def __init__(self, cog, guild_id):
         super().__init__(timeout=None)
         self.cog = cog
+
+        rec_data = self.cog.recommendations.get(guild_id)
+        if rec_data and not rec_data.get('loading') and rec_data.get('items'):
+            for i, r in enumerate(rec_data['items']):
+                btn_label = f"➕ {str(r)[:70]}"
+                btn = discord.ui.Button(label=btn_label, style=discord.ButtonStyle.success, row=1)
+                
+                def make_callback(song_query):
+                    async def callback(interaction: discord.Interaction):
+                        queue = self.cog.get_queue(interaction.guild.id)
+                        queue.append({
+                            'id': str(uuid.uuid4()), 
+                            'query': song_query, 
+                            'requester_id': interaction.user.id, 
+                            'requester_name': interaction.user.display_name
+                        })
+                        
+                        vc = interaction.guild.voice_client
+                        if not vc and interaction.user.voice:
+                            vc = await interaction.user.voice.channel.connect()
+                                
+                        await interaction.response.send_message(f"✅ 已為您點播推薦：**{song_query}**", ephemeral=True)
+                        
+                        class FakeCtx:
+                            def __init__(self, bot, guild, channel, vc, user):
+                                self.bot = bot; self.guild = guild; self.channel = channel
+                                self.voice_client = vc; self.author = user
+                                self.message = type('DummyMsg', (), {'author': user})()
+                            async def send(self, *args, **kwargs): pass
+                            
+                        if vc and not vc.is_playing() and not vc.is_paused():
+                            ctx = FakeCtx(self.cog.bot, interaction.guild, interaction.channel, vc, interaction.user)
+                            self.cog.bot.loop.create_task(self.cog.play_next(ctx))
+                        else:
+                            await self.cog.update_dashboard(interaction.guild, interaction.channel)
+                    return callback
+                
+                btn.callback = make_callback(r)
+                self.add_item(btn)
 
     @discord.ui.button(label="⏯ 暫停/播放", style=discord.ButtonStyle.primary, custom_id="dash_playpause")
     async def play_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -509,10 +548,7 @@ class Music(commands.Cog):
                     if rec_data.get('loading'):
                         embed.add_field(name="💡 AI 推薦歌曲 (DJ 思考中...)", value="...", inline=False)
                     elif rec_data.get('items'):
-                        rec_val = ""
-                        for i, r in enumerate(rec_data['items']):
-                            rec_val += f"`{i+1}.` {r}\n"
-                        rec_val += "\n*(複製貼上 `F!play 歌名` 即可播放)*"
+                        rec_val = "您可以直接點擊下方對應的按鈕快速加歌！"
                         embed.add_field(name="💡 延伸聆聽 (基於上一首)", value=rec_val, inline=False)
             
         up_next = ""
@@ -523,13 +559,14 @@ class Music(commands.Cog):
         
         if up_next: embed.add_field(name="⏳ 待播清單 (Up Next)", value=up_next, inline=False)
         
+        # The static status footer...
         status = "⏹️ 停止"
         if vc and vc.is_playing(): status = "▶️ 播放中"
         elif vc and vc.is_paused(): status = "⏸️ 暫停"
         if is_radio: status += " (📻電台)"
         
         embed.set_footer(text=f"狀態: {status} | 🔁 {LOOP_LABELS[loop_mode]} | 🔊 {volume}% | 這個面板會自動更新")
-        view = DashboardView(self)
+        view = DashboardView(self, guild.id)
         
         if guild.id not in self.dashboard_locks:
             self.dashboard_locks[guild.id] = asyncio.Lock()
