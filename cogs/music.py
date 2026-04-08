@@ -252,8 +252,9 @@ class DashboardView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog
 
+        queue = self.cog.get_queue(guild_id)
         rec_data = self.cog.recommendations.get(guild_id)
-        if rec_data and not rec_data.get('loading') and rec_data.get('items'):
+        if len(queue) == 0 and rec_data and not rec_data.get('loading') and rec_data.get('items'):
             for i, r in enumerate(rec_data['items']):
                 btn_label = f"➕ {str(r)[:70]}"
                 btn = discord.ui.Button(label=btn_label, style=discord.ButtonStyle.success, row=1)
@@ -543,18 +544,6 @@ class Music(commands.Cog):
             embed.description = ""
             embed.add_field(name="💤 已結束播放", value="目前列隊空空如也，趕快點歌吧！", inline=False)
             
-            # Show recommendations if available
-            rec_data = self.recommendations.get(guild.id)
-            if rec_data:
-                history = self.get_history(guild.id)
-                # Only show if the recommendation is for the actual last played song
-                if history and history[-1].get('query') == rec_data.get('base_query'):
-                    if rec_data.get('loading'):
-                        embed.add_field(name="💡 AI 推薦歌曲 (DJ 思考中...)", value="...", inline=False)
-                    elif rec_data.get('items'):
-                        rec_val = "您可以直接點擊下方對應的按鈕快速加歌！"
-                        embed.add_field(name="💡 延伸聆聽 (基於上一首)", value=rec_val, inline=False)
-            
         up_next = ""
         for i, item in enumerate(queue[:3]):
             q_label = str(item['query']) if not str(item['query']).startswith('http') else "🔗 URL"
@@ -562,6 +551,22 @@ class Music(commands.Cog):
         if len(queue) > 3: up_next += f"*(還有 {len(queue)-3} 首歌)*"
         
         if up_next: embed.add_field(name="⏳ 待播清單 (Up Next)", value=up_next, inline=False)
+        
+        # Show recommendations if queue is empty!
+        if len(queue) == 0:
+            rec_data = self.recommendations.get(guild.id)
+            if rec_data:
+                base_query = rec_data.get('base_query')
+                match_curr = current and current.get('query') == base_query
+                hist = self.get_history(guild.id)
+                match_hist = (not current) and hist and hist[-1].get('query') == base_query
+                
+                if match_curr or match_hist:
+                    if rec_data.get('loading'):
+                        embed.add_field(name="💡 AI 推薦歌曲 (DJ 思考中...)", value="...", inline=False)
+                    elif rec_data.get('items'):
+                        rec_val = "後面沒有歌了，您可以直接點擊下方按鈕快速加歌！"
+                        embed.add_field(name="💡 延伸聆聽 (為您推薦)", value=rec_val, inline=False)
         
         # The static status footer...
         status = "⏹️ 停止"
@@ -645,6 +650,14 @@ class Music(commands.Cog):
         self.recommendations[guild.id]['loading'] = False
         await self.update_dashboard(guild, channel)
 
+    async def schedule_early_recommendation(self, ctx, item):
+        await asyncio.sleep(30)
+        # Check if queue is still empty and this song is still playing
+        queue = self.get_queue(ctx.guild.id)
+        current = self.current_song.get(ctx.guild.id)
+        if len(queue) == 0 and current and current.get('id') == item.get('id'):
+            await self.fetch_and_show_recommendations(ctx.guild, ctx.channel, item)
+
     async def play_next(self, ctx, *, _retry: int = 0):
         queue = self.get_queue(ctx.guild.id)
         loop_mode = self.loop_mode.get(ctx.guild.id, LOOP_OFF)
@@ -693,6 +706,10 @@ class Music(commands.Cog):
                 intro_msg = await self.get_dj_intro(player.title, item['requester_name'], item['requester_id'])
                 self.last_dj_msg[ctx.guild.id] = intro_msg
                 await self.update_dashboard(ctx.guild, ctx.channel, force_resend=False)
+                
+                # If this is the last song in the queue, schedule early recommendations
+                if len(self.get_queue(ctx.guild.id)) == 0:
+                    self.bot.loop.create_task(self.schedule_early_recommendation(ctx, item))
             except Exception as e:
                 log.error(f"play_next error (retry {_retry}): {e}")
                 if _retry < 3:
