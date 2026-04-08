@@ -744,7 +744,7 @@ class Music(commands.Cog):
                 try:
                     # Search for tracks by this artist name
                     artist_tracks_search = await asyncio.to_thread(
-                        lambda: sp.search(q=artist_real_name, type='track', limit=30)
+                        lambda: sp.search(q=artist_real_name, type='track', limit=20, market='JP')
                     )
                     all_tracks = artist_tracks_search.get('tracks', {}).get('items', [])
                     
@@ -782,8 +782,10 @@ class Music(commands.Cog):
             # ============================================================
             # STEP 3: AI fallback with SPOTIFY verification
             # Each AI-suggested song is verified by searching Spotify to
-            # confirm it's a real track by this artist. No more yt-dlp
-            # false positives (e.g. "Kokoro Hitofuri" passing verification).
+            # confirm it's a real track by this artist.
+            # CRITICAL: We must verify the SONG NAME matches too, not just
+            # the artist. Spotify returns the most popular song first,
+            # which may be "Anytime Anywhere" for every query!
             # ============================================================
             if len(resolved) < 3 and artist_real_name:
                 log.info(f"[Rec] AI fallback for '{artist_real_name}' (have {len(resolved)})")
@@ -812,29 +814,46 @@ class Music(commands.Cog):
                             continue
                         
                         # VERIFY on Spotify: search for "artist_name song_name"
-                        # and check if the result's artist ID matches
                         if sp:
                             try:
                                 verify_result = await asyncio.to_thread(
-                                    lambda s=song_str: sp.search(q=f"{artist_real_name} {s}", type='track', limit=3)
+                                    lambda s=song_str: sp.search(q=f"{artist_real_name} {s}", type='track', limit=5)
                                 )
                                 verify_tracks = verify_result.get('tracks', {}).get('items', [])
                                 verified = False
                                 for vt in verify_tracks:
-                                    if any(a['id'] == artist_id for a in vt['artists']):
-                                        # The song actually belongs to this artist!
-                                        real_name = vt['name']
-                                        display = f"{artist_real_name} - {real_name}"
-                                        resolved.append({
-                                            'display': display,
-                                            'title': display,
-                                            'url': f"{artist_real_name} - {real_name}",
-                                        })
-                                        log.info(f"[Rec] AI verified via Spotify: '{song_str}' → '{real_name}'")
-                                        verified = True
+                                    # Check artist matches
+                                    if not any(a['id'] == artist_id for a in vt['artists']):
+                                        continue
+                                    
+                                    real_name = vt['name']
+                                    
+                                    # CRITICAL: Verify the Spotify result name actually matches
+                                    # the AI-suggested song (prevent "Lost" → "Anytime Anywhere")
+                                    suggested_norm = re.sub(r'[^a-z0-9]', '', song_str.lower())
+                                    result_norm = re.sub(r'[^a-z0-9]', '', real_name.lower())
+                                    if suggested_norm not in result_norm and result_norm not in suggested_norm:
+                                        continue  # Name mismatch — try next Spotify result
+                                    
+                                    # Also check dedup and exclusion on the REAL name
+                                    if _is_dupe_name(real_name):
+                                        log.info(f"[Rec] AI skip: '{real_name}' (duplicate)")
                                         break
+                                    if _is_excluded(real_name):
+                                        log.info(f"[Rec] AI skip: '{real_name}' (excluded)")
+                                        break
+                                    
+                                    display = f"{artist_real_name} - {real_name}"
+                                    resolved.append({
+                                        'display': display,
+                                        'title': display,
+                                        'url': f"{artist_real_name} - {real_name}",
+                                    })
+                                    log.info(f"[Rec] AI verified: '{song_str}' → '{real_name}'")
+                                    verified = True
+                                    break
                                 if not verified:
-                                    log.info(f"[Rec] AI rejected: '{song_str}' (not found on Spotify for {artist_real_name})")
+                                    log.info(f"[Rec] AI rejected: '{song_str}' (no matching track on Spotify)")
                             except Exception as e:
                                 log.warning(f"[Rec] Spotify verify failed for '{song_str}': {e}")
                         
