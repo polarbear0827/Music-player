@@ -502,18 +502,22 @@ class Music(commands.Cog):
             return ""
 
     async def update_dashboard(self, guild, channel=None, force_resend=False):
-        dash_info = self.dashboards.get(guild.id)
-        target_channel = channel if channel else (dash_info['channel'] if dash_info else None)
-        if not target_channel: return
-        
-        queue = self.get_queue(guild.id)
-        current = self.current_song.get(guild.id)
-        is_radio = guild.id in self.is_playing_radio
-        vc = guild.voice_client
-        loop_mode = self.loop_mode.get(guild.id, LOOP_OFF)
-        volume = int(self.volumes.get(guild.id, 0.5) * 100)
-        
-        embed = discord.Embed(title="🎧 DJ 蝦 派對儀表板 (Live)", color=0xFF69B4)
+        if guild.id not in self.dashboard_locks:
+            self.dashboard_locks[guild.id] = asyncio.Lock()
+            
+        async with self.dashboard_locks[guild.id]:
+            dash_info = self.dashboards.get(guild.id)
+            target_channel = channel if channel else (dash_info['channel'] if dash_info else None)
+            if not target_channel: return
+            
+            queue = self.get_queue(guild.id)
+            current = self.current_song.get(guild.id)
+            is_radio = guild.id in self.is_playing_radio
+            vc = guild.voice_client
+            loop_mode = self.loop_mode.get(guild.id, LOOP_OFF)
+            volume = int(self.volumes.get(guild.id, 0.5) * 100)
+            
+            embed = discord.Embed(title="🎧 DJ 蝦 派對儀表板 (Live)", color=0xFF69B4)
         
         if current:
             title_text = current.get('title', current['query'])
@@ -568,22 +572,22 @@ class Music(commands.Cog):
         embed.set_footer(text=f"狀態: {status} | 🔁 {LOOP_LABELS[loop_mode]} | 🔊 {volume}% | 這個面板會自動更新")
         view = DashboardView(self, guild.id)
         
-        if guild.id not in self.dashboard_locks:
-            self.dashboard_locks[guild.id] = asyncio.Lock()
-            
-        async with self.dashboard_locks[guild.id]:
-            try:
-                if not force_resend and dash_info and dash_info.get('message'):
-                    await dash_info['message'].edit(embed=embed, view=view)
-                else:
-                    if dash_info and dash_info.get('message'):
-                        try: await dash_info['message'].delete()
-                        except: pass
-                    msg = await target_channel.send(embed=embed, view=view)
-                    self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
-            except Exception:
+        try:
+            if not force_resend and dash_info and dash_info.get('message'):
+                await dash_info['message'].edit(embed=embed, view=view)
+            else:
+                if dash_info and dash_info.get('message'):
+                    try: await dash_info['message'].delete()
+                    except: pass
                 msg = await target_channel.send(embed=embed, view=view)
                 self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
+        except Exception:
+            try:
+                if dash_info and dash_info.get('message'):
+                    await dash_info['message'].delete()
+            except: pass
+            msg = await target_channel.send(embed=embed, view=view)
+            self.dashboards[guild.id] = {'channel': target_channel, 'message': msg}
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -671,6 +675,9 @@ class Music(commands.Cog):
                 self.current_song[ctx.guild.id]['duration'] = player.data.get('duration')
                 self.song_start_time[ctx.guild.id] = asyncio.get_event_loop().time()
 
+                self.last_dj_msg[ctx.guild.id] = f"🎙️ **DJ:** 💭 正在為您撰寫介紹詞..."
+                await self.update_dashboard(ctx.guild, ctx.channel, force_resend=True)
+
                 ctx.voice_client.play(
                     player,
                     after=lambda e: self.bot.loop.create_task(
@@ -680,7 +687,7 @@ class Music(commands.Cog):
 
                 intro_msg = await self.get_dj_intro(player.title, item['requester_name'], item['requester_id'])
                 self.last_dj_msg[ctx.guild.id] = intro_msg
-                await self.update_dashboard(ctx.guild, ctx.channel, force_resend=True)
+                await self.update_dashboard(ctx.guild, ctx.channel, force_resend=False)
             except Exception as e:
                 log.error(f"play_next error (retry {_retry}): {e}")
                 if _retry < 3:
