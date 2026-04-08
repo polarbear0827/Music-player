@@ -479,12 +479,19 @@ class Music(commands.Cog):
             title_text = current.get('title', current['query'])
             if str(title_text).startswith('http'): title_text = "🔗 外部網址"
             dj_txt = self.last_dj_msg.get(guild.id, "")
-            if dj_txt: embed.description = dj_txt
             progress = self._build_progress_bar(guild.id, current.get('duration'))
-            now_val = f"**{title_text}**\n*(點播者: {current['requester_name']})*"
-            if progress:
-                now_val += f"\n{progress}"
-            embed.add_field(name="🎵 正在播放", value=now_val, inline=False)
+            
+            if dj_txt: 
+                embed.description = dj_txt
+                now_val = f"*(點播者: {current['requester_name']})*"
+                if progress:
+                    now_val += f"\n{progress}"
+                embed.add_field(name="📊 播放進度", value=now_val, inline=False)
+            else:
+                now_val = f"**{title_text}**\n*(點播者: {current['requester_name']})*"
+                if progress:
+                    now_val += f"\n{progress}"
+                embed.add_field(name="🎵 Now playing", value=now_val, inline=False)
         elif is_radio:
             embed.description = ""
             embed.add_field(name="📻 24H 沉浸電台模式", value=f"**{self.active_radios.get(guild.id, 'Radio').upper()} Radio** 聯播中...", inline=False)
