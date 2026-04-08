@@ -667,41 +667,91 @@ class Music(commands.Cog):
         self.recommendations[guild.id] = {'base_query': last_played['query'], 'loading': True, 'items': []}
         await self.update_dashboard(guild, channel)
         
-        hist = [str(item.get('title') or item.get('query')) for item in self.get_history(guild.id)[-30:]]
-        played_str = ", ".join(hist) if hist else "無"
-
-        sys_prompt = (
-            "你是一個專業且被信任的音樂 DJ。根據『上一首歌』，列出 5 個對于 YouTube 最有效的「搜尋關鍵字」，用來找到相同歌手最熱門、可能存在於 YouTube 上的官方歌曲。\n"
-            "【規定】\n"
-            f"1. 已播清單：[{played_str}]。不要推薦這些！\n"
-            "2. 搜尋關鍵字格式：「歌手名 歌名 Official Audio」，只用英文或對應的原文對应名稱，不要翻譯第三方名稱。\n"
-            "3. 只能回傳純 JSON 陣列，5 個對應字串元素，不要加任何其他文字。範例: [\"Sunset Rollercoaster Candlelight Official Audio\", \"Sunset Rollercoaster My Jinji Official Audio\", \"Sunset Rollercoaster Jinji Kikko Official Audio\", \"Sunset Rollercoaster Jinji Kikko Official Audio\", \"Sunset Rollercoaster Vanilla Official Audio\"]"
-        )
+        hist_titles = {str(item.get('title') or item.get('query')).lower() for item in self.get_history(guild.id)[-50:]}
+        
         try:
-            api_key = GLOBAL_OR_API_KEY
-            messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": f"上一首歌：{last_played.get('title') or last_played['query']}"}]
-            raw_text = await call_openrouter(messages, api_key, max_tokens=200, temperature=0.1)
+            last_title = last_played.get('title') or last_played['query']
             
-            if raw_text.startswith("```json"): raw_text = raw_text[7:]
-            if raw_text.startswith("```"): raw_text = raw_text[3:]
-            if raw_text.endswith("```"): raw_text = raw_text[:-3]
+            # Step 1: Ask AI to extract ONLY the artist name
+            artist_prompt = (
+                f"從以下歌曲標題中，只提取出「歌手/樂團名稱」（使用英文原名）。"
+                f"歌曲標題：『{last_title}』\n"
+                "只回傳歌手名字，不要其他任何文字。範例：Sunset Rollercoaster"
+            )
+            artist_name = await call_openrouter(
+                [{"role": "user", "content": artist_prompt}],
+                GLOBAL_OR_API_KEY, max_tokens=30, temperature=0.0
+            )
+            artist_name = artist_name.strip().strip('"').strip("'")
+            log.info(f"[Rec] Extracted artist: {artist_name}")
             
-            search_keywords = json.loads(raw_text.strip())
-            if isinstance(search_keywords, list) and len(search_keywords) > 0:
-                # Use yt-dlp to resolve each search keyword into real title + URL
-                resolved = []
-                for kw in search_keywords[:5]:  # Try up to 5, keep first 3 valid ones
+            # Step 2: Search Spotify for this artist's top tracks (100% real data)
+            resolved = []
+            if sp and artist_name:
+                try:
+                    search_result = await asyncio.to_thread(
+                        lambda: sp.search(q=f"artist:{artist_name}", type='artist', limit=1)
+                    )
+                    artists = search_result.get('artists', {}).get('items', [])
+                    if artists:
+                        artist_id = artists[0]['id']
+                        top_tracks_result = await asyncio.to_thread(
+                            lambda: sp.artist_top_tracks(artist_id, country='TW')
+                        )
+                        top_tracks = top_tracks_result.get('tracks', [])
+                        
+                        # Filter out already-played songs
+                        candidates = []
+                        for track in top_tracks:
+                            track_name = track['name']
+                            artist_real = track['artists'][0]['name']
+                            search_str = f"{artist_real} {track_name}"
+                            if search_str.lower() not in hist_titles and track_name.lower() not in hist_titles:
+                                candidates.append(f"{artist_real} {track_name} Official Audio")
+                        
+                        log.info(f"[Rec] Spotify returned {len(top_tracks)} tracks, {len(candidates)} after filtering")
+                        
+                        # Step 3: Verify each candidate on YouTube via yt-dlp
+                        for kw in candidates[:6]:
+                            if len(resolved) >= 3:
+                                break
+                            result = await self._resolve_yt_search(kw)
+                            if result:
+                                resolved.append(result)
+                except Exception as e:
+                    log.error(f"[Rec] Spotify artist lookup failed: {e}")
+            
+            # Fallback: AI keyword search if Spotify didn't work
+            if not resolved:
+                log.info("[Rec] Falling back to AI keyword search")
+                played_str = ", ".join(list(hist_titles)[:30]) if hist_titles else "無"
+                fallback_prompt = (
+                    f"你是音樂 DJ。根據歌曲『{last_title}』，列出 5 個 YouTube 搜尋字串，"
+                    f"找該歌手真實存在的熱門歌曲（格式：「歌手英文名 歌名 Official Audio」）。"
+                    f"已播清單（不能重複）：[{played_str}]。"
+                    "只回傳純 JSON 陣列，不加任何說明。"
+                )
+                raw = await call_openrouter(
+                    [{"role": "user", "content": fallback_prompt}],
+                    GLOBAL_OR_API_KEY, max_tokens=200, temperature=0.1
+                )
+                raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```")
+                keywords = json.loads(raw)
+                for kw in keywords[:5]:
                     if len(resolved) >= 3:
                         break
                     result = await self._resolve_yt_search(str(kw))
                     if result:
                         resolved.append(result)
-                self.recommendations[guild.id]['items'] = resolved
-        except Exception as e:
-            log.error(f"Failed to fetch recommendations: {e}")
             
+            self.recommendations[guild.id]['items'] = resolved
+            
+        except Exception as e:
+            log.error(f"[Rec] fetch_and_show_recommendations failed: {e}")
+        
         self.recommendations[guild.id]['loading'] = False
         await self.update_dashboard(guild, channel)
+
 
     async def schedule_early_recommendation(self, ctx, item):
         await asyncio.sleep(30)
