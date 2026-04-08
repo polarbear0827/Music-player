@@ -742,11 +742,16 @@ class Music(commands.Cog):
             # ============================================================
             if sp and artist_real_name and artist_id:
                 try:
-                    # Search for tracks by this artist name
-                    artist_tracks_search = await asyncio.to_thread(
-                        lambda: sp.search(q=artist_real_name, type='track', limit=20, market='JP')
-                    )
-                    all_tracks = artist_tracks_search.get('tracks', {}).get('items', [])
+                    all_tracks = []
+                    # Fetch tracks by artist name in batches of 10 (since limit > 10 causes 400 error)
+                    for offset in [0, 10, 20]:
+                        artist_tracks_search = await asyncio.to_thread(
+                            lambda o=offset: sp.search(q=artist_real_name, type='track', limit=10, offset=o, market='JP')
+                        )
+                        tracks = artist_tracks_search.get('tracks', {}).get('items', [])
+                        all_tracks.extend(tracks)
+                        if not tracks or len(tracks) < 10:
+                            break
                     
                     # Filter to only tracks by this exact artist (by ID) and sort by popularity
                     artist_tracks = [t for t in all_tracks if any(a['id'] == artist_id for a in t['artists'])]
