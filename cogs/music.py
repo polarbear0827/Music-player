@@ -255,9 +255,17 @@ class DashboardView(discord.ui.View):
         queue = self.cog.get_queue(guild_id)
         rec_data = self.cog.recommendations.get(guild_id)
         if len(queue) == 0 and rec_data and not rec_data.get('loading') and rec_data.get('items'):
-            for i, r in enumerate(rec_data['items']):
-                btn_label = f"➕ {str(r)[:70]}"
-                btn = discord.ui.Button(label=btn_label, style=discord.ButtonStyle.success, row=1)
+            current = self.cog.current_song.get(guild_id)
+            hist = self.cog.get_history(guild_id)
+            base_query = rec_data.get('base_query')
+            
+            match_curr = current and current.get('query') == base_query
+            match_hist = (not current) and hist and hist[-1].get('query') == base_query
+            
+            if match_curr or match_hist:
+                for i, r in enumerate(rec_data['items']):
+                    btn_label = f"➕ {str(r)[:70]}"
+                    btn = discord.ui.Button(label=btn_label, style=discord.ButtonStyle.success, row=1)
                 
                 def make_callback(song_query):
                     async def callback(interaction: discord.Interaction):
