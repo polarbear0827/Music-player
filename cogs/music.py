@@ -252,7 +252,7 @@ class DashboardView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog
 
-    @discord.ui.button(label="⏯", style=discord.ButtonStyle.primary, custom_id="dash_playpause")
+    @discord.ui.button(label="⏯ 暫停/播放", style=discord.ButtonStyle.primary, custom_id="dash_playpause")
     async def play_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = interaction.guild.voice_client
         if not vc:
@@ -264,7 +264,7 @@ class DashboardView(discord.ui.View):
         await interaction.response.defer()
         await self.cog.update_dashboard(interaction.guild, interaction.channel)
 
-    @discord.ui.button(label="⏭", style=discord.ButtonStyle.secondary, custom_id="dash_skip")
+    @discord.ui.button(label="⏭ 切換下一首", style=discord.ButtonStyle.secondary, custom_id="dash_skip")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = interaction.guild.voice_client
         if not vc:
@@ -274,7 +274,7 @@ class DashboardView(discord.ui.View):
         vc.stop()
         await interaction.response.defer()
 
-    @discord.ui.button(label="⏹", style=discord.ButtonStyle.danger, custom_id="dash_stop")
+    @discord.ui.button(label="⏹ 停止並退出", style=discord.ButtonStyle.danger, custom_id="dash_stop")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = interaction.guild.voice_client
         if vc:
@@ -287,7 +287,7 @@ class DashboardView(discord.ui.View):
         await interaction.response.defer()
         await self.cog.update_dashboard(interaction.guild, interaction.channel)
 
-    @discord.ui.button(label="🔁", style=discord.ButtonStyle.secondary, custom_id="dash_loop")
+    @discord.ui.button(label="🔁 循環模式", style=discord.ButtonStyle.secondary, custom_id="dash_loop")
     async def toggle_loop(self, interaction: discord.Interaction, button: discord.ui.Button):
         gid = interaction.guild.id
         current = self.cog.loop_mode.get(gid, LOOP_OFF)
@@ -298,17 +298,7 @@ class DashboardView(discord.ui.View):
         )
         await self.cog.update_dashboard(interaction.guild, interaction.channel)
 
-    @discord.ui.button(label="🔀", style=discord.ButtonStyle.secondary, custom_id="dash_shuffle")
-    async def shuffle_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
-        gid = interaction.guild.id
-        queue = self.cog.get_queue(gid)
-        if len(queue) < 2:
-            return await interaction.response.send_message("列隊太短，無法打亂！", ephemeral=True)
-        random.shuffle(queue)
-        await interaction.response.send_message(f"🔀 已隨機打亂 {len(queue)} 首歌的順序！", ephemeral=True)
-        await self.cog.update_dashboard(interaction.guild, interaction.channel)
-
-    @discord.ui.button(label="📻", style=discord.ButtonStyle.success, custom_id="dash_radio")
+    @discord.ui.button(label="📻 背景電台", style=discord.ButtonStyle.success, custom_id="dash_radio")
     async def toggle_radio(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild_id = interaction.guild.id
         await interaction.response.defer(ephemeral=True)  # Always defer first to avoid double-response
