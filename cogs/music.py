@@ -359,6 +359,7 @@ class Music(commands.Cog):
         self.song_start_time = {} # {guild_id: float}
         self.dash_cooldown = {} # {guild_id: float}
         self.dashboard_locks = {}
+        self.recommendations = {} # {guild_id: {'base_query': str, 'loading': bool, 'items': list}}
         
         # SQLite Database Integration for Ranking System
         self._init_db()
@@ -499,6 +500,21 @@ class Music(commands.Cog):
             embed.description = ""
             embed.add_field(name="💤 已結束播放", value="目前列隊空空如也，趕快點歌吧！", inline=False)
             
+            # Show recommendations if available
+            rec_data = self.recommendations.get(guild.id)
+            if rec_data:
+                history = self.get_history(guild.id)
+                # Only show if the recommendation is for the actual last played song
+                if history and history[-1].get('query') == rec_data.get('base_query'):
+                    if rec_data.get('loading'):
+                        embed.add_field(name="💡 AI 推薦歌曲 (DJ 思考中...)", value="...", inline=False)
+                    elif rec_data.get('items'):
+                        rec_val = ""
+                        for i, r in enumerate(rec_data['items']):
+                            rec_val += f"`{i+1}.` {r}\n"
+                        rec_val += "\n*(複製貼上 `F!play 歌名` 即可播放)*"
+                        embed.add_field(name="💡 延伸聆聽 (基於上一首)", value=rec_val, inline=False)
+            
         up_next = ""
         for i, item in enumerate(queue[:3]):
             q_label = str(item['query']) if not str(item['query']).startswith('http') else "🔗 URL"
@@ -555,6 +571,33 @@ class Music(commands.Cog):
         except Exception as e:
             log.error(f"OpenRouter error: {e}")
             return f"🎵 **Now playing:** {song_title}\n*(Requested by {requester})*"
+
+    async def fetch_and_show_recommendations(self, guild, channel, last_played):
+        if self.recommendations.get(guild.id, {}).get('base_query') == last_played['query']:
+            return # Already tracking this song
+            
+        self.recommendations[guild.id] = {'base_query': last_played['query'], 'loading': True, 'items': []}
+        await self.update_dashboard(guild, channel)
+        
+        sys_prompt = ("你是一個專業音樂 DJ。根據使用者提供的上一首歌曲，推薦 3 首相關的歌曲（風格相近、同一歌手或年代相近）。"
+                      "嚴格規定：只能回傳純 JSON 陣列，不要有任何其他文字。格式範例: [\"Artist - Song 1\", \"Artist - Song 2\", \"Artist - Song 3\"]")
+        try:
+            api_key = GLOBAL_OR_API_KEY
+            messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": f"上一首歌：{last_played['query']}"}]
+            raw_text = await call_openrouter(messages, api_key, max_tokens=150)
+            
+            if raw_text.startswith("```json"): raw_text = raw_text[7:]
+            if raw_text.startswith("```"): raw_text = raw_text[3:]
+            if raw_text.endswith("```"): raw_text = raw_text[:-3]
+            
+            recs = json.loads(raw_text.strip())
+            if isinstance(recs, list) and len(recs) > 0:
+                self.recommendations[guild.id]['items'] = recs[:3]
+        except Exception as e:
+            log.error(f"Failed to fetch recommendations: {e}")
+            
+        self.recommendations[guild.id]['loading'] = False
+        await self.update_dashboard(guild, channel)
 
     async def play_next(self, ctx, *, _retry: int = 0):
         queue = self.get_queue(ctx.guild.id)
@@ -631,6 +674,9 @@ class Music(commands.Cog):
                     self.bot.loop.create_task(self.play_next(ctx))
             else:
                 self.last_dj_msg[ctx.guild.id] = ""
+                history = self.get_history(ctx.guild.id)
+                if history:
+                    self.bot.loop.create_task(self.fetch_and_show_recommendations(ctx.guild, ctx.channel, history[-1]))
                 await self.update_dashboard(ctx.guild, ctx.channel, force_resend=True)
 
     @commands.command(name='radio', help='Toggle 24/7 background radio. Options: lofi, jazz, synth, off')
