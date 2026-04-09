@@ -704,6 +704,14 @@ class Music(commands.Cog):
                 for e in exclude_titles:
                     if tn in e or e in tn:
                         return True
+                
+                # Fuzzy normalized check (ignores spaces and punctuation)
+                norm_tn = re.sub(r'[^\w]', '', tn)
+                if len(norm_tn) >= 4:
+                    for e in exclude_titles:
+                        norm_e = re.sub(r'[^\w]', '', e.lower())
+                        if norm_tn in norm_e or norm_e in norm_tn:
+                            return True
                 return False
             
             # ============================================================
@@ -732,40 +740,44 @@ class Music(commands.Cog):
                     search_title = re.sub(r'[（）\(\)\-｜|]', ' ', search_title).strip()
                     search_title = re.sub(r'\s+', ' ', search_title).strip()[:80]
                     
-                    log.info(f"[Rec] Searching Spotify track: '{search_title}'")
-                    
-                    track_search = await asyncio.to_thread(
-                        lambda: sp.search(q=search_title, type='track', limit=5)
-                    )
-                    tracks_found = track_search.get('tracks', {}).get('items', [])
-                    
-                    if tracks_found:
-                        best_track = None
-                        search_words = set(search_title.lower().split())
+                    if not search_title:
+                        search_title = last_title.strip()[:80]
+
+                    if search_title:
+                        log.info(f"[Rec] Searching Spotify track: '{search_title}'")
                         
-                        for track in tracks_found:
-                            t_name = track['name'].lower()
-                            a_name = track['artists'][0]['name'].lower()
-                            
-                            # Simple fuzzy check: at least one matching word, or substring match
-                            # Also normalize removing special characters for word matching
-                            track_words = set(re.sub(r'[^a-z0-9\u4e00-\u9fa5\u3040-\u30ff]', ' ', t_name + ' ' + a_name).split())
-                            search_words_norm = set(re.sub(r'[^a-z0-9\u4e00-\u9fa5\u3040-\u30ff]', ' ', search_title.lower()).split())
-                            
-                            common = search_words_norm.intersection(track_words)
-                            if common or a_name in search_title.lower() or t_name in search_title.lower() or search_title.lower() in t_name:
-                                best_track = track
-                                break
+                        track_search = await asyncio.to_thread(
+                            lambda: sp.search(q=search_title, type='track', limit=5)
+                        )
+                        tracks_found = track_search.get('tracks', {}).get('items', [])
                         
-                        if not best_track:
-                            log.warning(f"[Rec] Spotify returned tracks but none matched query '{search_title}'. First result was: {tracks_found[0]['artists'][0]['name']} - {tracks_found[0]['name']}")
-                        else:
-                            artist_id = best_track['artists'][0]['id']
-                            artist_real_name = best_track['artists'][0]['name']
-                            log.info(f"[Rec] Found artist: '{artist_real_name}' (id: {artist_id})")
+                        if tracks_found:
+                            best_track = None
+                            search_words = set(search_title.lower().split())
                             
-                            # Also exclude the current song's Spotify name
-                            _is_dupe_name(best_track['name'])  # Mark current song as seen
+                            for track in tracks_found:
+                                t_name = track['name'].lower()
+                                a_name = track['artists'][0]['name'].lower()
+                                
+                                # Simple fuzzy check: at least one matching word, or substring match
+                                # Also normalize removing special characters for word matching
+                                track_words = set(re.sub(r'[^a-z0-9\u4e00-\u9fa5\u3040-\u30ff]', ' ', t_name + ' ' + a_name).split())
+                                search_words_norm = set(re.sub(r'[^a-z0-9\u4e00-\u9fa5\u3040-\u30ff]', ' ', search_title.lower()).split())
+                                
+                                common = search_words_norm.intersection(track_words)
+                                if common or a_name in search_title.lower() or t_name in search_title.lower() or search_title.lower() in t_name:
+                                    best_track = track
+                                    break
+                            
+                            if not best_track:
+                                log.warning(f"[Rec] Spotify returned tracks but none matched query '{search_title}'. First result was: {tracks_found[0]['artists'][0]['name']} - {tracks_found[0]['name']}")
+                            else:
+                                artist_id = best_track['artists'][0]['id']
+                                artist_real_name = best_track['artists'][0]['name']
+                                log.info(f"[Rec] Found artist: '{artist_real_name}' (id: {artist_id})")
+                                
+                                # Also exclude the current song's Spotify name
+                                _is_dupe_name(best_track['name'])  # Mark current song as seen
                 except Exception as e:
                     log.error(f"[Rec] Spotify track search failed: {e}")
             
